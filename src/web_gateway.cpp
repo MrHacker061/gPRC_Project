@@ -2,12 +2,16 @@
 #include <httplib.h>
 
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "chat.grpc.pb.h"
@@ -206,8 +210,9 @@ int main(int argc, char** argv) {
     const std::string user_id = ParamOr(request, "userId", "");
     const std::string room = ParamOr(request, "room", "lobby");
 
-    response.set_header("Cache-Control", "no-cache");
+    response.set_header("Cache-Control", "no-cache, no-transform");
     response.set_header("Connection", "keep-alive");
+    response.set_header("X-Accel-Buffering", "no");
     response.set_chunked_content_provider(
         "text/event-stream",
         [&, user_id, room](size_t, httplib::DataSink& sink) {
@@ -216,19 +221,80 @@ int main(int argc, char** argv) {
           subscribe_request.set_room(room);
 
           ClientContext context;
-          std::unique_ptr<ClientReader<ChatEvent>> reader =
-              make_stub()->Subscribe(&context, subscribe_request);
+          std::mutex mutex;
+          std::condition_variable changed;
+          std::deque<ChatEvent> pending;
+          bool reader_done = false;
 
-          ChatEvent event;
-          while (reader->Read(&event)) {
-            const std::string payload = "data: " + EventToJson(event) + "\n\n";
+          std::thread reader_thread([&] {
+            std::unique_ptr<ClientReader<ChatEvent>> reader =
+                make_stub()->Subscribe(&context, subscribe_request);
+
+            ChatEvent event;
+            while (reader->Read(&event)) {
+              {
+                std::lock_guard<std::mutex> lock(mutex);
+                pending.push_back(event);
+              }
+              changed.notify_one();
+            }
+
+            reader->Finish();
+            {
+              std::lock_guard<std::mutex> lock(mutex);
+              reader_done = true;
+            }
+            changed.notify_one();
+          });
+
+          const std::string connected = ": connected\n\n";
+          if (!sink.write(connected.data(), connected.size())) {
+            context.TryCancel();
+            if (reader_thread.joinable()) {
+              reader_thread.join();
+            }
+            sink.done();
+            return false;
+          }
+
+          while (true) {
+            ChatEvent event;
+            bool has_event = false;
+            bool done = false;
+
+            {
+              std::unique_lock<std::mutex> lock(mutex);
+              changed.wait_for(lock, std::chrono::seconds(15), [&] {
+                return !pending.empty() || reader_done;
+              });
+
+              if (!pending.empty()) {
+                event = pending.front();
+                pending.pop_front();
+                has_event = true;
+              }
+              done = reader_done && pending.empty();
+            }
+
+            std::string payload;
+            if (has_event) {
+              payload = "data: " + EventToJson(event) + "\n\n";
+            } else if (done) {
+              break;
+            } else {
+              payload = ": heartbeat\n\n";
+            }
+
             if (!sink.write(payload.data(), payload.size())) {
               context.TryCancel();
               break;
             }
           }
 
-          reader->Finish();
+          context.TryCancel();
+          if (reader_thread.joinable()) {
+            reader_thread.join();
+          }
           sink.done();
           return false;
         });
