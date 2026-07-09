@@ -17,6 +17,7 @@ service ChatService {
 message JoinRequest {
   string display_name = 1;
   string room = 2;
+  string password = 3;
 }
 
 message JoinResponse {
@@ -29,10 +30,13 @@ message JoinResponse {
 message Room {
   string name = 1;
   int64 created_at_unix_ms = 2;
+  bool is_private = 3;
 }
 
 message CreateRoomRequest {
   string room = 1;
+  bool is_private = 2;
+  string password = 3;
 }
 
 message CreateRoomResponse {

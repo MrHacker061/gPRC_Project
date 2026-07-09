@@ -88,6 +88,14 @@ std::string NormalizeDisplayName(const std::string& display_name) {
   return normalized;
 }
 
+std::string NormalizePassword(const std::string& password) {
+  std::string normalized = Trim(password);
+  if (normalized.size() > 80) {
+    normalized.resize(80);
+  }
+  return normalized;
+}
+
 std::string MakeUserId() {
   static std::mutex mutex;
   static std::mt19937_64 rng{std::random_device{}()};
@@ -138,6 +146,8 @@ class ChatStore {
          "name TEXT PRIMARY KEY,"
          "created_at_unix_ms INTEGER NOT NULL"
          ");");
+    TryExec("ALTER TABLE rooms ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;");
+    TryExec("ALTER TABLE rooms ADD COLUMN password TEXT NOT NULL DEFAULT '';");
     Exec("CREATE TABLE IF NOT EXISTS events ("
          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
          "room TEXT NOT NULL,"
@@ -168,29 +178,49 @@ class ChatStore {
     }
   }
 
-  bool CreateRoom(const std::string& room) {
+  bool CreateRoom(const std::string& room,
+                  const bool is_private = false,
+                  const std::string& password = "") {
     std::lock_guard<std::mutex> lock(mutex_);
     Statement stmt(db_,
-                   "INSERT OR IGNORE INTO rooms(name, created_at_unix_ms) "
-                   "VALUES(?, ?);");
+                   "INSERT OR IGNORE INTO rooms(name, created_at_unix_ms, "
+                   "is_private, password) VALUES(?, ?, ?, ?);");
     BindText(stmt.get(), 1, room);
     sqlite3_bind_int64(stmt.get(), 2, NowUnixMs());
+    sqlite3_bind_int(stmt.get(), 3, is_private ? 1 : 0);
+    BindText(stmt.get(), 4, password);
     StepDone(stmt.get());
     return sqlite3_changes(db_) > 0;
   }
 
   void EnsureRoom(const std::string& room) { CreateRoom(room); }
 
+  bool CanJoinRoom(const std::string& room, const std::string& password) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Statement stmt(db_, "SELECT is_private, password FROM rooms WHERE name = ?;");
+    BindText(stmt.get(), 1, room);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+      return false;
+    }
+    const bool is_private = sqlite3_column_int(stmt.get(), 0) != 0;
+    if (!is_private) {
+      return true;
+    }
+    return ColumnText(stmt.get(), 1) == password;
+  }
+
   std::vector<Room> ListRooms() {
     std::vector<Room> rooms;
     std::lock_guard<std::mutex> lock(mutex_);
     Statement stmt(
         db_,
-        "SELECT name, created_at_unix_ms FROM rooms ORDER BY lower(name);");
+        "SELECT name, created_at_unix_ms, is_private FROM rooms "
+        "WHERE is_private = 0 ORDER BY lower(name);");
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
       Room room;
       room.set_name(ColumnText(stmt.get(), 0));
       room.set_created_at_unix_ms(sqlite3_column_int64(stmt.get(), 1));
+      room.set_is_private(sqlite3_column_int(stmt.get(), 2) != 0);
       rooms.push_back(room);
     }
     return rooms;
@@ -294,6 +324,13 @@ class ChatStore {
     }
   }
 
+  void TryExec(const char* sql) {
+    char* error = nullptr;
+    if (sqlite3_exec(db_, sql, nullptr, nullptr, &error) != SQLITE_OK) {
+      sqlite3_free(error);
+    }
+  }
+
   void StepDone(sqlite3_stmt* stmt) {
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       throw std::runtime_error(sqlite3_errmsg(db_));
@@ -362,7 +399,13 @@ class ChatHub {
     user.id = MakeUserId();
     user.display_name = NormalizeDisplayName(request.display_name());
     user.room = NormalizeRoom(request.room());
-    store_.EnsureRoom(user.room);
+
+    if (!store_.CanJoinRoom(user.room, NormalizePassword(request.password()))) {
+      JoinResponse response;
+      response.set_room(user.room);
+      response.set_message("Room not found or password is incorrect.");
+      return response;
+    }
 
     std::vector<std::string> active_users;
     {
@@ -394,7 +437,15 @@ class ChatHub {
       return response;
     }
 
-    const bool created = store_.CreateRoom(room);
+    const std::string password = NormalizePassword(request.password());
+    if (request.is_private() && password.empty()) {
+      response.set_created(false);
+      response.set_room(room);
+      response.set_error("Private rooms require a password.");
+      return response;
+    }
+
+    const bool created = store_.CreateRoom(room, request.is_private(), password);
     response.set_created(created);
     response.set_room(room);
     if (!created) {
@@ -416,7 +467,6 @@ class ChatHub {
     ChatMessage message = incoming;
     message.set_text(Trim(message.text()));
     message.set_room(NormalizeRoom(message.room()));
-    store_.EnsureRoom(message.room());
     if (message.sent_at_unix_ms() == 0) {
       message.set_sent_at_unix_ms(NowUnixMs());
     }

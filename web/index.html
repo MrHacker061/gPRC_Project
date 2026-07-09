@@ -176,6 +176,19 @@
         background: transparent;
       }
 
+      .inline-check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #46515f;
+        font-size: 14px;
+      }
+
+      .inline-check input {
+        width: auto;
+        min-height: auto;
+      }
+
       .room-list {
         display: grid;
         gap: 8px;
@@ -287,8 +300,14 @@
         </section>
         <form id="roomForm" class="side-form">
           <input id="roomInput" name="room" autocomplete="off" placeholder="New room" maxlength="40">
+          <label class="inline-check">
+            <input id="privateRoomInput" name="isPrivate" type="checkbox">
+            Private
+          </label>
+          <input id="roomPasswordInput" name="password" autocomplete="off" placeholder="Password" maxlength="80" hidden>
           <button type="submit">Create</button>
         </form>
+        <button id="joinPrivateButton" type="button">Join private</button>
         <section>
           <h2>Online</h2>
           <ul id="users"></ul>
@@ -308,14 +327,31 @@
       </div>
     </dialog>
 
+    <dialog id="privateDialog">
+      <div class="join">
+        <h2>Join private room</h2>
+        <form id="privateJoinForm">
+          <input id="privateRoomNameInput" name="room" autocomplete="off" placeholder="Room name" required maxlength="40">
+          <input name="password" autocomplete="off" placeholder="Password" required maxlength="80">
+          <button type="submit">Join private</button>
+        </form>
+      </div>
+    </dialog>
+
     <script>
       const joinDialog = document.querySelector("#joinDialog");
+      const privateDialog = document.querySelector("#privateDialog");
       const joinForm = document.querySelector("#joinForm");
+      const privateJoinForm = document.querySelector("#privateJoinForm");
       const messageForm = document.querySelector("#messageForm");
       const messageInput = document.querySelector("#messageInput");
       const sendButton = document.querySelector("#sendButton");
       const roomForm = document.querySelector("#roomForm");
       const roomInput = document.querySelector("#roomInput");
+      const privateRoomInput = document.querySelector("#privateRoomInput");
+      const roomPasswordInput = document.querySelector("#roomPasswordInput");
+      const joinPrivateButton = document.querySelector("#joinPrivateButton");
+      const privateRoomNameInput = document.querySelector("#privateRoomNameInput");
       const joinRoomInput = document.querySelector("#joinRoomInput");
       const messages = document.querySelector("#messages");
       const statusLine = document.querySelector("#status");
@@ -327,9 +363,11 @@
       let events = null;
       let lastEventId = 0;
       let pollTimer = null;
+      let roomTimer = null;
       let typingTimer = null;
       let typingUsers = new Set();
       let roomNames = [];
+      let privateRoomNames = [];
 
       function addSystem(text) {
         if (!text) return;
@@ -380,15 +418,20 @@
 
       function renderRooms() {
         rooms.replaceChildren();
-        for (const room of roomNames) {
+        for (const room of [...roomNames, ...privateRoomNames]) {
           const item = document.createElement("li");
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = room;
+          button.textContent = privateRoomNames.includes(room) ? `${room} private` : room;
           if (session && session.room === room) button.classList.add("active");
           button.addEventListener("click", () => {
             joinRoomInput.value = room;
-            if (session && session.room !== room) joinExistingSession(room);
+            if (privateRoomNames.includes(room)) {
+              privateRoomNameInput.value = room;
+              privateDialog.showModal();
+            } else if (session && session.room !== room) {
+              joinExistingSession(room);
+            }
           });
           item.append(button);
           rooms.append(item);
@@ -471,6 +514,12 @@
         pollTimer = setInterval(pollMessages, 1500);
       }
 
+      function startRoomRefresh() {
+        if (roomTimer) clearInterval(roomTimer);
+        loadRooms();
+        roomTimer = setInterval(loadRooms, 2000);
+      }
+
       function connectEvents() {
         if (events) events.close();
         const params = new URLSearchParams({
@@ -507,15 +556,19 @@
         }
       }
 
-      async function joinExistingSession(room) {
+      async function joinExistingSession(room, password = "") {
         if (!session) return;
         await sendTyping(false);
         const body = new URLSearchParams({
           name: session.displayName,
-          room
+          room,
+          password
         });
         const response = await fetch("/join", { method: "POST", body });
-        if (!response.ok) return;
+        if (!response.ok) {
+          addSystem("Could not join that room.");
+          return;
+        }
         session = await response.json();
         lastEventId = 0;
         addSystem(session.message);
@@ -550,13 +603,55 @@
         event.preventDefault();
         const room = roomInput.value.trim();
         if (!room) return;
+        const isPrivate = privateRoomInput.checked;
+        const password = roomPasswordInput.value.trim();
+        if (isPrivate && !password) {
+          addSystem("Private rooms need a password.");
+          return;
+        }
 
-        const body = new URLSearchParams({ room });
+        const body = new URLSearchParams({
+          room,
+          isPrivate: String(isPrivate),
+          password
+        });
         const response = await fetch("/rooms", { method: "POST", body });
         if (response.ok || response.status === 409) {
           roomInput.value = "";
+          roomPasswordInput.value = "";
           await loadRooms();
           joinRoomInput.value = room;
+          if (isPrivate && !privateRoomNames.includes(room)) {
+            privateRoomNames.push(room);
+            renderRooms();
+          }
+          if (isPrivate) {
+            await joinExistingSession(room, password);
+          }
+        }
+      });
+
+      privateRoomInput.addEventListener("change", () => {
+        roomPasswordInput.hidden = !privateRoomInput.checked;
+      });
+
+      joinPrivateButton.addEventListener("click", () => {
+        privateRoomNameInput.value = "";
+        privateDialog.showModal();
+      });
+
+      privateJoinForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const body = new URLSearchParams(new FormData(privateJoinForm));
+        const room = body.get("room").trim();
+        const password = body.get("password");
+        await joinExistingSession(room, password);
+        if (session && session.room === room) {
+          if (!privateRoomNames.includes(room)) {
+            privateRoomNames.push(room);
+          }
+          renderRooms();
+          privateDialog.close();
         }
       });
 
@@ -585,7 +680,7 @@
         typingTimer = setTimeout(() => sendTyping(false), 1200);
       });
 
-      loadRooms();
+      startRoomRefresh();
       joinDialog.showModal();
     </script>
   </body>

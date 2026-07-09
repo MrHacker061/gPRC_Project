@@ -182,6 +182,7 @@ int main(int argc, char** argv) {
     JoinRequest join_request;
     join_request.set_display_name(ParamOr(request, "name", "Browser Guest"));
     join_request.set_room(ParamOr(request, "room", "lobby"));
+    join_request.set_password(ParamOr(request, "password", ""));
 
     JoinResponse join_response;
     ClientContext context;
@@ -189,6 +190,12 @@ int main(int argc, char** argv) {
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
+                           "application/json");
+      return;
+    }
+    if (join_response.user_id().empty()) {
+      response.status = 403;
+      response.set_content(JsonResponse({{"error", join_response.message()}}),
                            "application/json");
       return;
     }
@@ -221,6 +228,8 @@ int main(int argc, char** argv) {
       }
       json << "{\"name\":\"" << JsonEscape(rooms_response.rooms(i).name())
            << "\",\"createdAt\":" << rooms_response.rooms(i).created_at_unix_ms()
+           << ",\"isPrivate\":"
+           << (rooms_response.rooms(i).is_private() ? "true" : "false")
            << "}";
     }
     json << "]}";
@@ -231,6 +240,8 @@ int main(int argc, char** argv) {
                             httplib::Response& response) {
     CreateRoomRequest room_request;
     room_request.set_room(ParamOr(request, "room", "lobby"));
+    room_request.set_is_private(ParamOr(request, "isPrivate", "false") == "true");
+    room_request.set_password(ParamOr(request, "password", ""));
 
     CreateRoomResponse room_response;
     ClientContext context;

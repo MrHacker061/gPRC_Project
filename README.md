@@ -135,7 +135,7 @@ localhost:50051
 - Browser-based chat
 - C++ gRPC backend
 - SQLite chat history
-- Create rooms
-- List and switch rooms
+- Public rooms that update in the room list
+- Private rooms that require a room name and password
 - Typing indicators
 - Cloudflare Tunnel support
