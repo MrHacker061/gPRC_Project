@@ -6,6 +6,7 @@ service ChatService {
   rpc Join(JoinRequest) returns (JoinResponse);
   rpc SendMessage(ChatMessage) returns (SendMessageResponse);
   rpc Subscribe(SubscribeRequest) returns (stream ChatEvent);
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
   rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
 }
 
@@ -51,6 +52,16 @@ message ChatEvent {
   ChatMessage message = 2;
   string system_text = 3;
   repeated string active_users = 4;
+  int64 event_id = 5;
+}
+
+message ListEventsRequest {
+  string room = 1;
+  int64 after_event_id = 2;
+}
+
+message ListEventsResponse {
+  repeated ChatEvent events = 1;
 }
 
 message ListUsersRequest {

@@ -268,6 +268,8 @@
 
       let session = null;
       let events = null;
+      let lastEventId = 0;
+      let pollTimer = null;
 
       function addSystem(text) {
         if (!text) return;
@@ -305,6 +307,44 @@
         }
       }
 
+      function handleEventPayload(payload) {
+        if (payload.eventId && payload.eventId <= lastEventId) return;
+        if (payload.eventId) lastEventId = payload.eventId;
+        updateUsers(payload.activeUsers);
+        if (payload.message) {
+          addMessage(payload.message);
+        } else {
+          addSystem(payload.systemText);
+        }
+      }
+
+      async function pollMessages() {
+        if (!session) return;
+        const params = new URLSearchParams({
+          room: session.room,
+          afterEventId: String(lastEventId)
+        });
+
+        try {
+          const response = await fetch(`/messages?${params.toString()}`, {
+            cache: "no-store"
+          });
+          if (!response.ok) return;
+          const payload = await response.json();
+          for (const event of payload.events || []) {
+            handleEventPayload(event);
+          }
+        } catch {
+          statusLine.textContent = "Connected by polling fallback";
+        }
+      }
+
+      function startPollingFallback() {
+        if (pollTimer) clearInterval(pollTimer);
+        pollMessages();
+        pollTimer = setInterval(pollMessages, 1500);
+      }
+
       function connectEvents() {
         const params = new URLSearchParams({
           userId: session.userId,
@@ -317,17 +357,11 @@
         };
 
         events.onmessage = (event) => {
-          const payload = JSON.parse(event.data);
-          updateUsers(payload.activeUsers);
-          if (payload.message) {
-            addMessage(payload.message);
-          } else {
-            addSystem(payload.systemText);
-          }
+          handleEventPayload(JSON.parse(event.data));
         };
 
         events.onerror = () => {
-          statusLine.textContent = "Connection interrupted. Reconnecting...";
+          statusLine.textContent = "Live stream interrupted. Polling for updates...";
         };
       }
 
@@ -347,6 +381,7 @@
         messageInput.focus();
         addSystem(session.message);
         connectEvents();
+        startPollingFallback();
       });
 
       messageForm.addEventListener("submit", async (event) => {

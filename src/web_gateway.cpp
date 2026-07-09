@@ -23,6 +23,8 @@ using chat::ChatMessage;
 using chat::ChatService;
 using chat::JoinRequest;
 using chat::JoinResponse;
+using chat::ListEventsRequest;
+using chat::ListEventsResponse;
 using chat::SendMessageResponse;
 using chat::SubscribeRequest;
 using grpc::Channel;
@@ -90,6 +92,7 @@ std::string EventTypeName(ChatEvent::EventType type) {
 std::string EventToJson(const ChatEvent& event) {
   std::ostringstream json;
   json << "{\"type\":\"" << EventTypeName(event.type()) << "\"";
+  json << ",\"eventId\":" << event.event_id();
   json << ",\"systemText\":\"" << JsonEscape(event.system_text()) << "\"";
 
   if (event.has_message()) {
@@ -203,6 +206,36 @@ int main(int argc, char** argv) {
     }
 
     response.set_content("{\"ok\":true}", "application/json");
+  });
+
+  server.Get("/messages", [&](const httplib::Request& request,
+                              httplib::Response& response) {
+    ListEventsRequest events_request;
+    events_request.set_room(ParamOr(request, "room", "lobby"));
+    events_request.set_after_event_id(
+        std::stoll(ParamOr(request, "afterEventId", "0")));
+
+    ListEventsResponse events_response;
+    ClientContext context;
+    const Status status =
+        make_stub()->ListEvents(&context, events_request, &events_response);
+    if (!status.ok()) {
+      response.status = 502;
+      response.set_content(JsonResponse({{"error", status.error_message()}}),
+                           "application/json");
+      return;
+    }
+
+    std::ostringstream json;
+    json << "{\"events\":[";
+    for (int i = 0; i < events_response.events_size(); ++i) {
+      if (i > 0) {
+        json << ",";
+      }
+      json << EventToJson(events_response.events(i));
+    }
+    json << "]}";
+    response.set_content(json.str(), "application/json");
   });
 
   server.Get("/events", [&](const httplib::Request& request,

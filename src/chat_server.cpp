@@ -22,6 +22,8 @@ using chat::ChatMessage;
 using chat::ChatService;
 using chat::JoinRequest;
 using chat::JoinResponse;
+using chat::ListEventsRequest;
+using chat::ListEventsResponse;
 using chat::ListUsersRequest;
 using chat::ListUsersResponse;
 using chat::SendMessageResponse;
@@ -33,6 +35,7 @@ using grpc::ServerWriter;
 using grpc::Status;
 
 constexpr const char* kDefaultRoom = "lobby";
+constexpr std::size_t kMaxHistoryPerRoom = 200;
 
 int64_t NowUnixMs() {
   const auto now = std::chrono::system_clock::now();
@@ -147,6 +150,23 @@ class ChatHub {
     return ActiveUsersLocked(NormalizeRoom(room));
   }
 
+  std::vector<ChatEvent> ListEvents(const std::string& room,
+                                    const int64_t after_event_id) {
+    std::vector<ChatEvent> events;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto history = history_by_room_.find(NormalizeRoom(room));
+    if (history == history_by_room_.end()) {
+      return events;
+    }
+
+    for (const auto& event : history->second) {
+      if (event.event_id() > after_event_id) {
+        events.push_back(event);
+      }
+    }
+    return events;
+  }
+
   void Subscribe(ServerContext* context,
                  const SubscribeRequest& request,
                  ServerWriter<ChatEvent>* writer) {
@@ -235,8 +255,16 @@ class ChatHub {
 
   void Publish(const std::string& room, const ChatEvent& event) {
     std::vector<std::shared_ptr<Subscriber>> subscribers;
+    ChatEvent saved_event = event;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      saved_event.set_event_id(++next_event_id_);
+      auto& history = history_by_room_[room];
+      history.push_back(saved_event);
+      while (history.size() > kMaxHistoryPerRoom) {
+        history.pop_front();
+      }
+
       subscribers_.erase(
           std::remove_if(subscribers_.begin(), subscribers_.end(),
                          [](const std::weak_ptr<Subscriber>& weak) {
@@ -255,7 +283,7 @@ class ChatHub {
     for (const auto& subscriber : subscribers) {
       {
         std::lock_guard<std::mutex> lock(subscriber->mutex);
-        subscriber->events.push_back(event);
+        subscriber->events.push_back(saved_event);
       }
       subscriber->changed.notify_one();
     }
@@ -273,7 +301,9 @@ class ChatHub {
 
   std::mutex mutex_;
   std::map<std::string, User> users_;
+  std::map<std::string, std::deque<ChatEvent>> history_by_room_;
   std::vector<std::weak_ptr<Subscriber>> subscribers_;
+  int64_t next_event_id_ = 0;
 };
 
 class ChatServiceImpl final : public ChatService::Service {
@@ -296,6 +326,16 @@ class ChatServiceImpl final : public ChatService::Service {
                    const SubscribeRequest* request,
                    ServerWriter<ChatEvent>* writer) override {
     hub_.Subscribe(context, *request, writer);
+    return Status::OK;
+  }
+
+  Status ListEvents(ServerContext*,
+                    const ListEventsRequest* request,
+                    ListEventsResponse* response) override {
+    for (const auto& event :
+         hub_.ListEvents(request->room(), request->after_event_id())) {
+      *response->add_events() = event;
+    }
     return Status::OK;
   }
 
