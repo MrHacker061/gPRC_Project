@@ -56,6 +56,15 @@ If CMake was previously run incorrectly, delete `build` and try again:
 Remove-Item -Recurse -Force build
 ```
 
+## Quick Start
+
+To rebuild everything, start the gRPC server, start the web gateway, start Cloudflare Tunnel, and print the public Cloudflare URL:
+
+```powershell
+cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
+powershell -ExecutionPolicy Bypass -File .\scripts\start-cloud-chat.ps1
+```
+
 ## 3. Start The gRPC Server
 
 Open a PowerShell window:
