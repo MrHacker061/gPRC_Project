@@ -101,6 +101,92 @@ ipconfig
 
 Look for the IPv4 address on your active Wi-Fi or Ethernet adapter.
 
+## Let others join from anywhere with Cloudflare Tunnel
+
+For people outside your local network, expose the browser gateway with Cloudflare Tunnel. Browser users still do not need to install anything. They only open the public URL.
+
+Important: tunnel the web gateway on `localhost:8080`, not the gRPC server on `localhost:50051`.
+
+```text
+Internet browser users
+    |
+    | HTTPS public URL
+    v
+Cloudflare Tunnel
+    |
+    | http://localhost:8080
+    v
+web_gateway
+    |
+    | gRPC localhost:50051
+    v
+chat_server
+```
+
+### Quick testing tunnel
+
+This is the fastest way to share the app while developing. It creates a random public `trycloudflare.com` URL.
+
+Install `cloudflared` on Windows:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+Start the chat server:
+
+```powershell
+.\build\Release\chat_server.exe
+```
+
+Start the browser gateway:
+
+```powershell
+.\build\Release\web_gateway.exe localhost:50051 8080
+```
+
+In another terminal, start the tunnel:
+
+```powershell
+cloudflared tunnel --url http://localhost:8080
+```
+
+`cloudflared` will print a public URL. Send that URL to someone and they can join from a browser.
+
+Quick tunnels are best for testing because the URL is random and temporary.
+
+### Permanent tunnel with your own domain
+
+Use this when you want a stable URL like:
+
+```text
+https://chat.yourdomain.com
+```
+
+High-level setup:
+
+1. Add your domain to Cloudflare.
+2. Open the Cloudflare Zero Trust dashboard.
+3. Go to `Networks` -> `Connectors` -> `Cloudflare Tunnels`.
+4. Create a tunnel.
+5. Choose `Cloudflared`.
+6. Name it something like `grpc-chat`.
+7. Run the install/start command Cloudflare shows for your machine.
+8. Add a public hostname:
+   - Subdomain: `chat`
+   - Domain: your domain
+   - Service type: `HTTP`
+   - Service URL: `localhost:8080`
+
+Keep both local processes running:
+
+```powershell
+.\build\Release\chat_server.exe
+.\build\Release\web_gateway.exe localhost:50051 8080
+```
+
+Then visitors can open your Cloudflare hostname and join the browser chat.
+
 ## Next feature ideas
 
 - Persist chat history to SQLite.
