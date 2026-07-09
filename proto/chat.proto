@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package chat;
+
+service ChatService {
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc SendMessage(ChatMessage) returns (SendMessageResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream ChatEvent);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+}
+
+message JoinRequest {
+  string display_name = 1;
+  string room = 2;
+}
+
+message JoinResponse {
+  string user_id = 1;
+  string display_name = 2;
+  string room = 3;
+  string message = 4;
+}
+
+message ChatMessage {
+  string user_id = 1;
+  string display_name = 2;
+  string room = 3;
+  string text = 4;
+  int64 sent_at_unix_ms = 5;
+}
+
+message SendMessageResponse {
+  bool accepted = 1;
+  string error = 2;
+}
+
+message SubscribeRequest {
+  string user_id = 1;
+  string room = 2;
+}
+
+message ChatEvent {
+  enum EventType {
+    MESSAGE = 0;
+    USER_JOINED = 1;
+    USER_LEFT = 2;
+    SYSTEM = 3;
+  }
+
+  EventType type = 1;
+  ChatMessage message = 2;
+  string system_text = 3;
+  repeated string active_users = 4;
+}
+
+message ListUsersRequest {
+  string room = 1;
+}
+
+message ListUsersResponse {
+  repeated string display_names = 1;
+}
