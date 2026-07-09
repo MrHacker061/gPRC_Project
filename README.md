@@ -1,217 +1,141 @@
 # gRPC Browser Chat
 
-A small C++ chat project that uses gRPC for the core chat service and exposes a normal webpage so other people can join from a browser.
-
-## Architecture
+A C++ chat app where browser users join through a webpage, while the backend uses gRPC.
 
 ```text
 Browser users
-    |
-    | HTTP form posts + Server-Sent Events
-    v
-web_gateway  (C++ / cpp-httplib)
-    |
-    | gRPC
-    v
-chat_server  (C++ / gRPC)
-    ^
-    |
-chat_cli     (C++ / gRPC terminal client)
+  -> Cloudflare public URL
+  -> web_gateway on localhost:8080
+  -> gRPC chat_server on localhost:50051
+  -> SQLite chat_history.db
 ```
 
-Browsers do not speak native gRPC directly, so `web_gateway` serves `web/index.html` and bridges browser traffic to the gRPC server.
+The browser does not talk to gRPC directly. It talks to `web_gateway`, and the gateway talks to `chat_server` using gRPC.
 
-## Project layout
+## 1. Install Tools
 
-- `proto/chat.proto` defines the gRPC service.
-- `src/chat_server.cpp` runs the chat room server.
-- `src/chat_cli.cpp` runs a terminal chat client.
-- `src/web_gateway.cpp` serves the browser page and talks to gRPC.
-- `web/index.html` is the browser chat UI.
-- `vcpkg.json` lists the C++ dependencies.
+Install these on the machine that will run the server:
 
-## Prerequisites
-
-Install these first:
-
-- Visual Studio 2022 with the C++ desktop workload
-- CMake 3.24 or newer
+- Visual Studio 2022 Build Tools with C++ tools
+- CMake
 - Git
 - vcpkg
+- cloudflared
 
-Example vcpkg setup:
+Useful install commands:
+
+```powershell
+winget install --id Kitware.CMake
+winget install --id Cloudflare.cloudflared
+winget install --id Microsoft.VisualStudio.2022.BuildTools --source winget --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Set up vcpkg:
 
 ```powershell
 git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat
 ```
 
-## Build
+Open a new PowerShell window after installing tools.
 
-From the repo root:
+## 2. Build
+
+From the repo folder:
 
 ```powershell
+cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
+
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
 cmake --build build --config Release
 ```
 
-The first build can take a while because vcpkg builds gRPC and protobuf.
-
-If a configure attempt fails, delete the partial `build` folder before trying again:
+If CMake was previously run incorrectly, delete `build` and try again:
 
 ```powershell
 Remove-Item -Recurse -Force build
 ```
 
-## Run locally
+## 3. Start The gRPC Server
 
-Open three terminals from the repo root.
-
-Start the gRPC server:
+Open a PowerShell window:
 
 ```powershell
+cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
 .\build\Release\chat_server.exe
 ```
 
-By default the server stores room and chat history in `chat_history.db` in the current directory. You can choose a different database path:
+The server listens on:
+
+```text
+localhost:50051
+```
+
+Chat history is saved to:
+
+```text
+chat_history.db
+```
+
+To choose a custom database file:
 
 ```powershell
 .\build\Release\chat_server.exe 0.0.0.0:50051 my-chat.db
 ```
 
-Start the browser gateway:
+## 4. Start The Web Gateway
+
+Open a second PowerShell window:
 
 ```powershell
+cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
 .\build\Release\web_gateway.exe localhost:50051 8080
 ```
 
-Open the webpage:
+The gateway listens on:
 
 ```text
 http://localhost:8080
 ```
 
-Optionally join from the terminal client:
+## 5. Start Cloudflare Tunnel
 
-```powershell
-.\build\Release\chat_cli.exe localhost:50051 Jacob lobby
-```
-
-## Chat features
-
-- Create rooms from the browser sidebar.
-- List and switch rooms from the sidebar.
-- Load saved chat history from SQLite when joining a room.
-- Show active users per room.
-- Show typing indicators.
-- Keep receiving updates through the polling fallback if the live stream is interrupted by a tunnel or proxy.
-
-## Let others join
-
-Keep `chat_server.exe` and `web_gateway.exe` running on your machine. Other people on the same network can open:
-
-```text
-http://YOUR_LOCAL_IP:8080
-```
-
-On Windows, you may need to allow the gateway through the firewall. You can find your local IP with:
-
-```powershell
-ipconfig
-```
-
-Look for the IPv4 address on your active Wi-Fi or Ethernet adapter.
-
-## Let others join from anywhere with Cloudflare Tunnel
-
-For people outside your local network, expose the browser gateway with Cloudflare Tunnel. Browser users still do not need to install anything. They only open the public URL.
-
-Important: tunnel the web gateway on `localhost:8080`, not the gRPC server on `localhost:50051`.
-
-```text
-Internet browser users
-    |
-    | HTTPS public URL
-    v
-Cloudflare Tunnel
-    |
-    | http://localhost:8080
-    v
-web_gateway
-    |
-    | gRPC localhost:50051
-    v
-chat_server
-```
-
-### Quick testing tunnel
-
-This is the fastest way to share the app while developing. It creates a random public `trycloudflare.com` URL.
-
-Install `cloudflared` on Windows:
-
-```powershell
-winget install --id Cloudflare.cloudflared
-```
-
-Start the chat server:
-
-```powershell
-.\build\Release\chat_server.exe
-```
-
-Start the browser gateway:
-
-```powershell
-.\build\Release\web_gateway.exe localhost:50051 8080
-```
-
-In another terminal, start the tunnel:
+Open a third PowerShell window:
 
 ```powershell
 cloudflared tunnel --url http://localhost:8080
 ```
 
-`cloudflared` will print a public URL. Send that URL to someone and they can join from a browser.
-
-Quick tunnels are best for testing because the URL is random and temporary.
-
-### Permanent tunnel with your own domain
-
-Use this when you want a stable URL like:
+Cloudflare will print a public URL like:
 
 ```text
-https://chat.yourdomain.com
+https://example-random-name.trycloudflare.com
 ```
 
-High-level setup:
+Send that URL to people. They can join from a browser without downloading anything.
 
-1. Add your domain to Cloudflare.
-2. Open the Cloudflare Zero Trust dashboard.
-3. Go to `Networks` -> `Connectors` -> `Cloudflare Tunnels`.
-4. Create a tunnel.
-5. Choose `Cloudflared`.
-6. Name it something like `grpc-chat`.
-7. Run the install/start command Cloudflare shows for your machine.
-8. Add a public hostname:
-   - Subdomain: `chat`
-   - Domain: your domain
-   - Service type: `HTTP`
-   - Service URL: `localhost:8080`
+## Important
 
-Keep both local processes running:
+Tunnel this:
 
-```powershell
-.\build\Release\chat_server.exe
-.\build\Release\web_gateway.exe localhost:50051 8080
+```text
+http://localhost:8080
 ```
 
-Then visitors can open your Cloudflare hostname and join the browser chat.
+Do not tunnel this:
 
-## Next feature ideas
+```text
+localhost:50051
+```
 
-- Persist chat history to SQLite.
-- Add multiple rooms to the UI.
-- Add private messages.
-- Add TLS for the gRPC server and HTTPS for the gateway.
-- Add authentication or invite codes before exposing it outside your local network.
+`8080` is the webpage gateway. `50051` is the internal gRPC server.
+
+## Features
+
+- Browser-based chat
+- C++ gRPC backend
+- SQLite chat history
+- Create rooms
+- List and switch rooms
+- Typing indicators
+- Cloudflare Tunnel support
