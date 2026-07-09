@@ -4,9 +4,13 @@ package chat;
 
 service ChatService {
   rpc Join(JoinRequest) returns (JoinResponse);
+  rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
+  rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse);
   rpc SendMessage(ChatMessage) returns (SendMessageResponse);
+  rpc SendTyping(TypingRequest) returns (TypingResponse);
   rpc Subscribe(SubscribeRequest) returns (stream ChatEvent);
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
   rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
 }
 
@@ -22,6 +26,27 @@ message JoinResponse {
   string message = 4;
 }
 
+message Room {
+  string name = 1;
+  int64 created_at_unix_ms = 2;
+}
+
+message CreateRoomRequest {
+  string room = 1;
+}
+
+message CreateRoomResponse {
+  bool created = 1;
+  string room = 2;
+  string error = 3;
+}
+
+message ListRoomsRequest {}
+
+message ListRoomsResponse {
+  repeated Room rooms = 1;
+}
+
 message ChatMessage {
   string user_id = 1;
   string display_name = 2;
@@ -35,6 +60,17 @@ message SendMessageResponse {
   string error = 2;
 }
 
+message TypingRequest {
+  string user_id = 1;
+  string display_name = 2;
+  string room = 3;
+  bool is_typing = 4;
+}
+
+message TypingResponse {
+  bool accepted = 1;
+}
+
 message SubscribeRequest {
   string user_id = 1;
   string room = 2;
@@ -46,6 +82,7 @@ message ChatEvent {
     USER_JOINED = 1;
     USER_LEFT = 2;
     SYSTEM = 3;
+    TYPING = 4;
   }
 
   EventType type = 1;
@@ -53,6 +90,8 @@ message ChatEvent {
   string system_text = 3;
   repeated string active_users = 4;
   int64 event_id = 5;
+  string typing_user = 6;
+  bool is_typing = 7;
 }
 
 message ListEventsRequest {
@@ -62,6 +101,16 @@ message ListEventsRequest {
 
 message ListEventsResponse {
   repeated ChatEvent events = 1;
+}
+
+message GetHistoryRequest {
+  string room = 1;
+  int32 limit = 2;
+}
+
+message GetHistoryResponse {
+  repeated ChatMessage messages = 1;
+  int64 latest_event_id = 2;
 }
 
 message ListUsersRequest {

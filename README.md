@@ -73,6 +73,12 @@ Start the gRPC server:
 .\build\Release\chat_server.exe
 ```
 
+By default the server stores room and chat history in `chat_history.db` in the current directory. You can choose a different database path:
+
+```powershell
+.\build\Release\chat_server.exe 0.0.0.0:50051 my-chat.db
+```
+
 Start the browser gateway:
 
 ```powershell
@@ -90,6 +96,15 @@ Optionally join from the terminal client:
 ```powershell
 .\build\Release\chat_cli.exe localhost:50051 Jacob lobby
 ```
+
+## Chat features
+
+- Create rooms from the browser sidebar.
+- List and switch rooms from the sidebar.
+- Load saved chat history from SQLite when joining a room.
+- Show active users per room.
+- Show typing indicators.
+- Keep receiving updates through the polling fallback if the live stream is interrupted by a tunnel or proxy.
 
 ## Let others join
 

@@ -21,12 +21,20 @@ namespace {
 using chat::ChatEvent;
 using chat::ChatMessage;
 using chat::ChatService;
+using chat::CreateRoomRequest;
+using chat::CreateRoomResponse;
+using chat::GetHistoryRequest;
+using chat::GetHistoryResponse;
 using chat::JoinRequest;
 using chat::JoinResponse;
 using chat::ListEventsRequest;
 using chat::ListEventsResponse;
+using chat::ListRoomsRequest;
+using chat::ListRoomsResponse;
 using chat::SendMessageResponse;
 using chat::SubscribeRequest;
+using chat::TypingRequest;
+using chat::TypingResponse;
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::ClientReader;
@@ -84,6 +92,8 @@ std::string EventTypeName(ChatEvent::EventType type) {
       return "user_left";
     case ChatEvent::SYSTEM:
       return "system";
+    case ChatEvent::TYPING:
+      return "typing";
     default:
       return "unknown";
   }
@@ -94,6 +104,8 @@ std::string EventToJson(const ChatEvent& event) {
   json << "{\"type\":\"" << EventTypeName(event.type()) << "\"";
   json << ",\"eventId\":" << event.event_id();
   json << ",\"systemText\":\"" << JsonEscape(event.system_text()) << "\"";
+  json << ",\"typingUser\":\"" << JsonEscape(event.typing_user()) << "\"";
+  json << ",\"isTyping\":" << (event.is_typing() ? "true" : "false");
 
   if (event.has_message()) {
     const auto& message = event.message();
@@ -138,6 +150,16 @@ std::string ParamOr(const httplib::Request& request,
   return request.has_param(key) ? request.get_param_value(key) : fallback;
 }
 
+int64_t IntParamOr(const httplib::Request& request,
+                   const std::string& key,
+                   int64_t fallback) {
+  try {
+    return std::stoll(ParamOr(request, key, std::to_string(fallback)));
+  } catch (...) {
+    return fallback;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -179,6 +201,56 @@ int main(int argc, char** argv) {
         "application/json");
   });
 
+  server.Get("/rooms", [&](const httplib::Request&, httplib::Response& response) {
+    ListRoomsRequest rooms_request;
+    ListRoomsResponse rooms_response;
+    ClientContext context;
+    const Status status = make_stub()->ListRooms(&context, rooms_request, &rooms_response);
+    if (!status.ok()) {
+      response.status = 502;
+      response.set_content(JsonResponse({{"error", status.error_message()}}),
+                           "application/json");
+      return;
+    }
+
+    std::ostringstream json;
+    json << "{\"rooms\":[";
+    for (int i = 0; i < rooms_response.rooms_size(); ++i) {
+      if (i > 0) {
+        json << ",";
+      }
+      json << "{\"name\":\"" << JsonEscape(rooms_response.rooms(i).name())
+           << "\",\"createdAt\":" << rooms_response.rooms(i).created_at_unix_ms()
+           << "}";
+    }
+    json << "]}";
+    response.set_content(json.str(), "application/json");
+  });
+
+  server.Post("/rooms", [&](const httplib::Request& request,
+                            httplib::Response& response) {
+    CreateRoomRequest room_request;
+    room_request.set_room(ParamOr(request, "room", "lobby"));
+
+    CreateRoomResponse room_response;
+    ClientContext context;
+    const Status status = make_stub()->CreateRoom(&context, room_request, &room_response);
+    if (!status.ok()) {
+      response.status = 502;
+      response.set_content(JsonResponse({{"error", status.error_message()}}),
+                           "application/json");
+      return;
+    }
+    if (!room_response.error().empty() && !room_response.created()) {
+      response.status = 409;
+    }
+    response.set_content(
+        JsonResponse({{"room", room_response.room()},
+                      {"created", room_response.created() ? "true" : "false"},
+                      {"error", room_response.error()}}),
+        "application/json");
+  });
+
   server.Post("/send", [&](const httplib::Request& request,
                            httplib::Response& response) {
     ChatMessage message;
@@ -208,12 +280,32 @@ int main(int argc, char** argv) {
     response.set_content("{\"ok\":true}", "application/json");
   });
 
+  server.Post("/typing", [&](const httplib::Request& request,
+                             httplib::Response& response) {
+    TypingRequest typing_request;
+    typing_request.set_user_id(ParamOr(request, "userId", ""));
+    typing_request.set_display_name(ParamOr(request, "displayName", "Browser Guest"));
+    typing_request.set_room(ParamOr(request, "room", "lobby"));
+    typing_request.set_is_typing(ParamOr(request, "isTyping", "false") == "true");
+
+    TypingResponse typing_response;
+    ClientContext context;
+    const Status status =
+        make_stub()->SendTyping(&context, typing_request, &typing_response);
+    if (!status.ok()) {
+      response.status = 502;
+      response.set_content(JsonResponse({{"error", status.error_message()}}),
+                           "application/json");
+      return;
+    }
+    response.set_content("{\"ok\":true}", "application/json");
+  });
+
   server.Get("/messages", [&](const httplib::Request& request,
                               httplib::Response& response) {
     ListEventsRequest events_request;
     events_request.set_room(ParamOr(request, "room", "lobby"));
-    events_request.set_after_event_id(
-        std::stoll(ParamOr(request, "afterEventId", "0")));
+    events_request.set_after_event_id(IntParamOr(request, "afterEventId", 0));
 
     ListEventsResponse events_response;
     ClientContext context;
@@ -233,6 +325,39 @@ int main(int argc, char** argv) {
         json << ",";
       }
       json << EventToJson(events_response.events(i));
+    }
+    json << "]}";
+    response.set_content(json.str(), "application/json");
+  });
+
+  server.Get("/history", [&](const httplib::Request& request,
+                             httplib::Response& response) {
+    GetHistoryRequest history_request;
+    history_request.set_room(ParamOr(request, "room", "lobby"));
+    history_request.set_limit(static_cast<int32_t>(IntParamOr(request, "limit", 50)));
+
+    GetHistoryResponse history_response;
+    ClientContext context;
+    const Status status =
+        make_stub()->GetHistory(&context, history_request, &history_response);
+    if (!status.ok()) {
+      response.status = 502;
+      response.set_content(JsonResponse({{"error", status.error_message()}}),
+                           "application/json");
+      return;
+    }
+
+    std::ostringstream json;
+    json << "{\"lastEventId\":" << history_response.latest_event_id()
+         << ",\"messages\":[";
+    for (int i = 0; i < history_response.messages_size(); ++i) {
+      if (i > 0) {
+        json << ",";
+      }
+      ChatEvent event;
+      event.set_type(ChatEvent::MESSAGE);
+      *event.mutable_message() = history_response.messages(i);
+      json << EventToJson(event);
     }
     json << "]}";
     response.set_content(json.str(), "application/json");

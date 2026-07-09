@@ -147,6 +147,9 @@
         border-left: 1px solid #e2dccf;
         background: #f7f5ef;
         padding: 20px;
+        display: grid;
+        align-content: start;
+        gap: 18px;
       }
 
       aside h2 {
@@ -163,6 +166,44 @@
         margin: 0;
         padding: 0;
         list-style: none;
+      }
+
+      .side-form {
+        display: grid;
+        gap: 8px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+      }
+
+      .room-list {
+        display: grid;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .room-list button {
+        width: 100%;
+        min-height: 36px;
+        border: 1px solid #e2dccf;
+        background: #ffffff;
+        color: #1f2933;
+        text-align: left;
+      }
+
+      .room-list button.active {
+        border-color: #0f766e;
+        background: #ccfbf1;
+      }
+
+      #typing {
+        min-height: 20px;
+        padding: 0 20px 12px;
+        color: #64748b;
+        font-size: 14px;
+        background: #fffaf0;
       }
 
       #users li {
@@ -233,14 +274,25 @@
           <div id="status" class="status">Joining...</div>
         </header>
         <div id="messages" aria-live="polite"></div>
+        <div id="typing"></div>
         <form id="messageForm">
           <input id="messageInput" name="text" autocomplete="off" placeholder="Write a message" disabled>
           <button id="sendButton" type="submit" disabled>Send</button>
         </form>
       </section>
       <aside>
-        <h2>Online</h2>
-        <ul id="users"></ul>
+        <section>
+          <h2>Rooms</h2>
+          <ul id="rooms" class="room-list"></ul>
+        </section>
+        <form id="roomForm" class="side-form">
+          <input id="roomInput" name="room" autocomplete="off" placeholder="New room" maxlength="40">
+          <button type="submit">Create</button>
+        </form>
+        <section>
+          <h2>Online</h2>
+          <ul id="users"></ul>
+        </section>
       </aside>
     </main>
 
@@ -250,7 +302,7 @@
         <p>Pick a display name and room.</p>
         <form id="joinForm">
           <input name="name" autocomplete="name" placeholder="Display name" required maxlength="40">
-          <input name="room" value="lobby" placeholder="Room" maxlength="40">
+          <input id="joinRoomInput" name="room" value="lobby" placeholder="Room" maxlength="40">
           <button type="submit">Join</button>
         </form>
       </div>
@@ -262,14 +314,22 @@
       const messageForm = document.querySelector("#messageForm");
       const messageInput = document.querySelector("#messageInput");
       const sendButton = document.querySelector("#sendButton");
+      const roomForm = document.querySelector("#roomForm");
+      const roomInput = document.querySelector("#roomInput");
+      const joinRoomInput = document.querySelector("#joinRoomInput");
       const messages = document.querySelector("#messages");
       const statusLine = document.querySelector("#status");
       const users = document.querySelector("#users");
+      const rooms = document.querySelector("#rooms");
+      const typing = document.querySelector("#typing");
 
       let session = null;
       let events = null;
       let lastEventId = 0;
       let pollTimer = null;
+      let typingTimer = null;
+      let typingUsers = new Set();
+      let roomNames = [];
 
       function addSystem(text) {
         if (!text) return;
@@ -307,11 +367,77 @@
         }
       }
 
+      function updateTyping() {
+        const names = [...typingUsers].filter((name) => !session || name !== session.displayName);
+        if (names.length === 0) {
+          typing.textContent = "";
+        } else if (names.length === 1) {
+          typing.textContent = `${names[0]} is typing...`;
+        } else {
+          typing.textContent = `${names.slice(0, 3).join(", ")} are typing...`;
+        }
+      }
+
+      function renderRooms() {
+        rooms.replaceChildren();
+        for (const room of roomNames) {
+          const item = document.createElement("li");
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = room;
+          if (session && session.room === room) button.classList.add("active");
+          button.addEventListener("click", () => {
+            joinRoomInput.value = room;
+            if (session && session.room !== room) joinExistingSession(room);
+          });
+          item.append(button);
+          rooms.append(item);
+        }
+      }
+
+      async function loadRooms() {
+        try {
+          const response = await fetch("/rooms", { cache: "no-store" });
+          if (!response.ok) return;
+          const payload = await response.json();
+          roomNames = (payload.rooms || []).map((room) => room.name);
+          renderRooms();
+        } catch {
+          // Room list is a convenience; joining by name still works.
+        }
+      }
+
+      async function loadHistory() {
+        if (!session) return;
+        messages.replaceChildren();
+        typingUsers.clear();
+        updateTyping();
+        const params = new URLSearchParams({ room: session.room, limit: "80" });
+        const response = await fetch(`/history?${params.toString()}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json();
+        lastEventId = Math.max(lastEventId, payload.lastEventId || 0);
+        for (const event of payload.messages || []) {
+          if (event.message) addMessage(event.message);
+        }
+      }
+
       function handleEventPayload(payload) {
         if (payload.eventId && payload.eventId <= lastEventId) return;
         if (payload.eventId) lastEventId = payload.eventId;
         updateUsers(payload.activeUsers);
+        if (payload.type === "typing") {
+          if (payload.isTyping) {
+            typingUsers.add(payload.typingUser);
+          } else {
+            typingUsers.delete(payload.typingUser);
+          }
+          updateTyping();
+          return;
+        }
         if (payload.message) {
+          typingUsers.delete(payload.message.displayName);
+          updateTyping();
           addMessage(payload.message);
         } else {
           addSystem(payload.systemText);
@@ -346,6 +472,7 @@
       }
 
       function connectEvents() {
+        if (events) events.close();
         const params = new URLSearchParams({
           userId: session.userId,
           room: session.room
@@ -365,6 +492,39 @@
         };
       }
 
+      async function sendTyping(isTyping) {
+        if (!session) return;
+        const body = new URLSearchParams({
+          userId: session.userId,
+          displayName: session.displayName,
+          room: session.room,
+          isTyping: String(isTyping)
+        });
+        try {
+          await fetch("/typing", { method: "POST", body });
+        } catch {
+          // Typing indicators are best effort.
+        }
+      }
+
+      async function joinExistingSession(room) {
+        if (!session) return;
+        await sendTyping(false);
+        const body = new URLSearchParams({
+          name: session.displayName,
+          room
+        });
+        const response = await fetch("/join", { method: "POST", body });
+        if (!response.ok) return;
+        session = await response.json();
+        lastEventId = 0;
+        addSystem(session.message);
+        renderRooms();
+        await loadHistory();
+        connectEvents();
+        startPollingFallback();
+      }
+
       joinForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const body = new URLSearchParams(new FormData(joinForm));
@@ -379,9 +539,25 @@
         messageInput.disabled = false;
         sendButton.disabled = false;
         messageInput.focus();
+        await loadHistory();
         addSystem(session.message);
+        renderRooms();
         connectEvents();
         startPollingFallback();
+      });
+
+      roomForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const room = roomInput.value.trim();
+        if (!room) return;
+
+        const body = new URLSearchParams({ room });
+        const response = await fetch("/rooms", { method: "POST", body });
+        if (response.ok || response.status === 409) {
+          roomInput.value = "";
+          await loadRooms();
+          joinRoomInput.value = room;
+        }
       });
 
       messageForm.addEventListener("submit", async (event) => {
@@ -402,6 +578,14 @@
         }
       });
 
+      messageInput.addEventListener("input", () => {
+        if (!session) return;
+        sendTyping(true);
+        clearTimeout(typingTimer);
+        typingTimer = setTimeout(() => sendTyping(false), 1200);
+      });
+
+      loadRooms();
       joinDialog.showModal();
     </script>
   </body>

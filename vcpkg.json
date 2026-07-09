@@ -4,6 +4,7 @@
   "dependencies": [
     "grpc",
     "protobuf",
-    "cpp-httplib"
+    "cpp-httplib",
+    "sqlite3"
   ]
 }

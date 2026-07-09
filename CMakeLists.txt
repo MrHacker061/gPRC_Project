@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 find_package(httplib CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/chat.proto")
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -41,7 +42,7 @@ target_include_directories(chat_proto PUBLIC "${GENERATED_DIR}")
 target_link_libraries(chat_proto PUBLIC gRPC::grpc++ protobuf::libprotobuf)
 
 add_executable(chat_server src/chat_server.cpp)
-target_link_libraries(chat_server PRIVATE chat_proto)
+target_link_libraries(chat_server PRIVATE chat_proto unofficial::sqlite3::sqlite3)
 
 add_executable(chat_cli src/chat_cli.cpp)
 target_link_libraries(chat_cli PRIVATE chat_proto)
