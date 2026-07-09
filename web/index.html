@@ -368,6 +368,25 @@
       let typingUsers = new Set();
       let roomNames = [];
       let privateRoomNames = [];
+      let privatePasswords = {};
+
+      function loadPrivateRooms() {
+        try {
+          privatePasswords = JSON.parse(localStorage.getItem("privateRoomPasswords") || "{}");
+          privateRoomNames = Object.keys(privatePasswords);
+        } catch {
+          privatePasswords = {};
+          privateRoomNames = [];
+        }
+      }
+
+      function rememberPrivateRoom(room, password) {
+        if (!room || !password) return;
+        privatePasswords[room] = password;
+        privateRoomNames = Object.keys(privatePasswords);
+        localStorage.setItem("privateRoomPasswords", JSON.stringify(privatePasswords));
+        renderRooms();
+      }
 
       function addSystem(text) {
         if (!text) return;
@@ -427,8 +446,7 @@
           button.addEventListener("click", () => {
             joinRoomInput.value = room;
             if (privateRoomNames.includes(room)) {
-              privateRoomNameInput.value = room;
-              privateDialog.showModal();
+              joinExistingSession(room, privatePasswords[room] || "");
             } else if (session && session.room !== room) {
               joinExistingSession(room);
             }
@@ -621,11 +639,8 @@
           roomPasswordInput.value = "";
           await loadRooms();
           joinRoomInput.value = room;
-          if (isPrivate && !privateRoomNames.includes(room)) {
-            privateRoomNames.push(room);
-            renderRooms();
-          }
           if (isPrivate) {
+            rememberPrivateRoom(room, password);
             await joinExistingSession(room, password);
           }
         }
@@ -647,10 +662,7 @@
         const password = body.get("password");
         await joinExistingSession(room, password);
         if (session && session.room === room) {
-          if (!privateRoomNames.includes(room)) {
-            privateRoomNames.push(room);
-          }
-          renderRooms();
+          rememberPrivateRoom(room, password);
           privateDialog.close();
         }
       });
@@ -680,6 +692,7 @@
         typingTimer = setTimeout(() => sendTyping(false), 1200);
       });
 
+      loadPrivateRooms();
       startRoomRefresh();
       joinDialog.showModal();
     </script>
