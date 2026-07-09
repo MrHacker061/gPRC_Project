@@ -30,7 +30,7 @@ add_custom_command(
     ARGS --grpc_out "${GENERATED_DIR}"
          --cpp_out "${GENERATED_DIR}"
          -I "${CMAKE_CURRENT_SOURCE_DIR}/proto"
-         --plugin=protoc-gen-grpc="${GRPC_CPP_PLUGIN}"
+         --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
          "${PROTO_FILE}"
     DEPENDS "${PROTO_FILE}"
     COMMENT "Generating C++ gRPC sources from proto/chat.proto"
