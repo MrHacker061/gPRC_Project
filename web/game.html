@@ -204,6 +204,7 @@
     const nameInput = document.getElementById("nameInput");
 
     let socket = null;
+    let playerId = "";
     let snapshot = { players: [], arenaWidth: 960, arenaHeight: 620, you: "" };
     let sequence = 0;
     const keys = { up: false, down: false, left: false, right: false };
@@ -232,8 +233,11 @@
       socket.addEventListener("message", (event) => {
         const data = JSON.parse(event.data);
         if (data.type === "joined") {
+          playerId = data.playerId;
+          snapshot.you = data.playerId;
           joinPanel.classList.add("hidden");
           setStatus("Connected");
+          sendInput();
           return;
         }
         if (data.type === "snapshot") {
@@ -246,6 +250,8 @@
       });
 
       socket.addEventListener("close", () => {
+        playerId = "";
+        resetKeys();
         setStatus("Disconnected");
         joinButton.disabled = false;
         joinPanel.classList.remove("hidden");
@@ -257,7 +263,7 @@
     }
 
     function sendInput() {
-      if (!socket || socket.readyState !== WebSocket.OPEN || !snapshot.you) {
+      if (!socket || socket.readyState !== WebSocket.OPEN || !playerId) {
         return;
       }
       socket.send(JSON.stringify({
@@ -270,16 +276,47 @@
       }));
     }
 
+    function keyDirection(event) {
+      switch (event.code) {
+        case "KeyW":
+        case "ArrowUp":
+          return "up";
+        case "KeyS":
+        case "ArrowDown":
+          return "down";
+        case "KeyA":
+        case "ArrowLeft":
+          return "left";
+        case "KeyD":
+        case "ArrowRight":
+          return "right";
+        default:
+          return "";
+      }
+    }
+
     function updateKey(event, isDown) {
-      const key = event.key.toLowerCase();
-      if (key === "w" || key === "arrowup") keys.up = isDown;
-      else if (key === "s" || key === "arrowdown") keys.down = isDown;
-      else if (key === "a" || key === "arrowleft") keys.left = isDown;
-      else if (key === "d" || key === "arrowright") keys.right = isDown;
-      else return;
+      const direction = keyDirection(event);
+      if (!direction) {
+        return;
+      }
 
       event.preventDefault();
-      sendInput();
+      if (keys[direction] !== isDown) {
+        keys[direction] = isDown;
+        sendInput();
+      }
+    }
+
+    function resetKeys() {
+      const hadInput = keys.up || keys.down || keys.left || keys.right;
+      keys.up = false;
+      keys.down = false;
+      keys.left = false;
+      keys.right = false;
+      if (hadInput) {
+        sendInput();
+      }
     }
 
     function drawGrid(scaleX, scaleY) {
@@ -340,6 +377,12 @@
 
     window.addEventListener("keydown", (event) => updateKey(event, true));
     window.addEventListener("keyup", (event) => updateKey(event, false));
+    window.addEventListener("blur", resetKeys);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        resetKeys();
+      }
+    });
     window.setInterval(sendInput, 50);
     requestAnimationFrame(draw);
   </script>
