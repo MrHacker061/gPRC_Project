@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package game;
+
+service GameService {
+  rpc JoinGame(JoinGameRequest) returns (JoinGameResponse);
+  rpc LeaveGame(LeaveGameRequest) returns (LeaveGameResponse);
+  rpc SendInput(PlayerInput) returns (InputAck);
+  rpc StreamWorld(WorldRequest) returns (stream WorldSnapshot);
+}
+
+message JoinGameRequest {
+  string display_name = 1;
+}
+
+message JoinGameResponse {
+  string player_id = 1;
+  float arena_width = 2;
+  float arena_height = 3;
+}
+
+message LeaveGameRequest {
+  string player_id = 1;
+}
+
+message LeaveGameResponse {
+  bool ok = 1;
+}
+
+message PlayerInput {
+  string player_id = 1;
+  bool up = 2;
+  bool down = 3;
+  bool left = 4;
+  bool right = 5;
+  uint64 sequence = 6;
+}
+
+message InputAck {
+  uint64 sequence = 1;
+}
+
+message WorldRequest {
+  string player_id = 1;
+}
+
+message PlayerState {
+  string player_id = 1;
+  string display_name = 2;
+  float x = 3;
+  float y = 4;
+  float size = 5;
+  string color = 6;
+}
+
+message WorldSnapshot {
+  uint64 tick = 1;
+  float arena_width = 2;
+  float arena_height = 3;
+  repeated PlayerState players = 4;
+}

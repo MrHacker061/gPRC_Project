@@ -1,28 +1,20 @@
-# gRPC Browser Chat
+# gRPC Browser Chat and Box Arena
 
-A C++ chat app where browser users join through a webpage, while the backend uses gRPC.
+A C++ project with a gRPC backend, a browser chat app, and a small real-time top-down multiplayer game.
 
 ```text
 Browser users
   -> Cloudflare public URL
   -> web_gateway on localhost:8080
-  -> gRPC chat_server on localhost:50051
-  -> SQLite chat_history.db
+  -> chat_server on localhost:50051
+  -> game_server on localhost:50052
 ```
 
-The browser does not talk to gRPC directly. It talks to `web_gateway`, and the gateway talks to `chat_server` using gRPC.
+Browsers do not talk to gRPC directly. They talk to `web_gateway`; the gateway talks to the C++ gRPC servers.
 
-## 1. Install Tools
+## Cloud Server Setup
 
-Install these on the machine that will run the server:
-
-- Visual Studio 2022 Build Tools with C++ tools
-- CMake
-- Git
-- vcpkg
-- cloudflared
-
-Useful install commands:
+Install the required tools on the machine that will host the project:
 
 ```powershell
 winget install --id Kitware.CMake
@@ -30,121 +22,57 @@ winget install --id Cloudflare.cloudflared
 winget install --id Microsoft.VisualStudio.2022.BuildTools --source winget --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 ```
 
-Set up vcpkg:
+Install vcpkg:
 
 ```powershell
 git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat
 ```
 
-Open a new PowerShell window after installing tools.
-
-## 2. Build
-
-From the repo folder:
-
-```powershell
-cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
-
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
-cmake --build build --config Release
-```
-
-If CMake was previously run incorrectly, delete `build` and try again:
-
-```powershell
-Remove-Item -Recurse -Force build
-```
-
-## Quick Start
-
-To rebuild everything, start the gRPC server, start the web gateway, start Cloudflare Tunnel, and print the public Cloudflare URL:
+Open a new PowerShell window, then run:
 
 ```powershell
 cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
 powershell -ExecutionPolicy Bypass -File .\scripts\start-cloud-chat.ps1
 ```
 
-## 3. Start The gRPC Server
+That command rebuilds the project, starts:
 
-Open a PowerShell window:
+- `chat_server.exe`
+- `game_server.exe`
+- `web_gateway.exe`
+- `cloudflared`
 
-```powershell
-cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
-.\build\Release\chat_server.exe
-```
-
-The server listens on:
+It also prints public Cloudflare URLs:
 
 ```text
-localhost:50051
+Cloudflare chat URL: https://example.trycloudflare.com
+Cloudflare game URL: https://example.trycloudflare.com/game
 ```
 
-Chat history is saved to:
+Send the `/game` URL to people who should join the top-down box arena.
 
-```text
-chat_history.db
-```
+## Important Ports
 
-To choose a custom database file:
-
-```powershell
-.\build\Release\chat_server.exe 0.0.0.0:50051 my-chat.db
-```
-
-## 4. Start The Web Gateway
-
-Open a second PowerShell window:
-
-```powershell
-cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
-.\build\Release\web_gateway.exe localhost:50051 8080
-```
-
-The gateway listens on:
+Tunnel only the web gateway:
 
 ```text
 http://localhost:8080
 ```
 
-## 5. Start Cloudflare Tunnel
-
-Open a third PowerShell window:
-
-```powershell
-cloudflared tunnel --url http://localhost:8080
-```
-
-Cloudflare will print a public URL like:
-
-```text
-https://example-random-name.trycloudflare.com
-```
-
-Send that URL to people. They can join from a browser without downloading anything.
-
-## Important
-
-Tunnel this:
-
-```text
-http://localhost:8080
-```
-
-Do not tunnel this:
+Do not tunnel the gRPC ports directly:
 
 ```text
 localhost:50051
+localhost:50052
 ```
-
-`8080` is the webpage gateway. `50051` is the internal gRPC server.
 
 ## Features
 
-- Browser-based chat
-- C++ gRPC backend
+- Browser chat
 - SQLite chat history
-- Public rooms that update in the room list
-- Private rooms that require a room name and password
+- Public and private chat rooms
 - Typing indicators
+- Real-time top-down multiplayer game
+- WASD player movement
 - Cloudflare Tunnel support

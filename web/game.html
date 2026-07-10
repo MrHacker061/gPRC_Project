@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Box Arena</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #111318;
+      color: #f5f7fb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(135deg, rgba(45, 212, 191, 0.12), transparent 32%),
+        linear-gradient(315deg, rgba(249, 115, 22, 0.10), transparent 32%),
+        #111318;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-height: 100vh;
+      gap: 14px;
+      padding: 16px;
+    }
+
+    header,
+    footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 36px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .status {
+      color: #aeb7c8;
+      font-size: 14px;
+      min-width: 160px;
+      text-align: right;
+    }
+
+    .arena-wrap {
+      min-height: 0;
+      display: grid;
+      place-items: center;
+    }
+
+    canvas {
+      width: min(100%, 1180px);
+      height: min(72vh, 720px);
+      max-height: calc(100vh - 150px);
+      background: #161a22;
+      border: 1px solid #303845;
+      border-radius: 8px;
+      box-shadow: 0 18px 46px rgba(0, 0, 0, 0.32);
+    }
+
+    .join-panel {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background: rgba(17, 19, 24, 0.78);
+      backdrop-filter: blur(10px);
+    }
+
+    .join-box {
+      width: min(100%, 380px);
+      display: grid;
+      gap: 12px;
+      padding: 18px;
+      border: 1px solid #303845;
+      border-radius: 8px;
+      background: #181d26;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.38);
+    }
+
+    .join-box h2 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      color: #c9d2df;
+      font-size: 13px;
+    }
+
+    input,
+    button {
+      min-height: 42px;
+      border-radius: 8px;
+      font: inherit;
+      letter-spacing: 0;
+    }
+
+    input {
+      width: 100%;
+      border: 1px solid #3b4656;
+      background: #0f1218;
+      color: #f5f7fb;
+      padding: 0 12px;
+    }
+
+    button {
+      border: 0;
+      background: #2dd4bf;
+      color: #08110f;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.6;
+    }
+
+    .hud {
+      color: #aeb7c8;
+      font-size: 13px;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    @media (max-width: 680px) {
+      .shell {
+        padding: 10px;
+      }
+
+      header,
+      footer {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .status {
+        text-align: left;
+      }
+
+      canvas {
+        height: 70vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <h1>Box Arena</h1>
+      <div class="status" id="status">Not connected</div>
+    </header>
+
+    <section class="arena-wrap" aria-label="Game arena">
+      <canvas id="arena" width="960" height="620"></canvas>
+    </section>
+
+    <footer>
+      <div class="hud" id="players">Players: 0</div>
+      <div class="hud">WASD to move</div>
+    </footer>
+  </main>
+
+  <section class="join-panel" id="joinPanel">
+    <form class="join-box" id="joinForm">
+      <h2>Join the arena</h2>
+      <label>
+        Display name
+        <input id="nameInput" maxlength="24" autocomplete="nickname" placeholder="Player">
+      </label>
+      <button id="joinButton" type="submit">Join</button>
+    </form>
+  </section>
+
+  <script>
+    const canvas = document.getElementById("arena");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const playersEl = document.getElementById("players");
+    const joinPanel = document.getElementById("joinPanel");
+    const joinForm = document.getElementById("joinForm");
+    const joinButton = document.getElementById("joinButton");
+    const nameInput = document.getElementById("nameInput");
+
+    let socket = null;
+    let snapshot = { players: [], arenaWidth: 960, arenaHeight: 620, you: "" };
+    let sequence = 0;
+    const keys = { up: false, down: false, left: false, right: false };
+
+    const savedName = localStorage.getItem("boxArenaName");
+    if (savedName) {
+      nameInput.value = savedName;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function connect(name) {
+      localStorage.setItem("boxArenaName", name);
+      joinButton.disabled = true;
+      setStatus("Connecting...");
+
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(`${protocol}//${location.host}/game/ws`);
+
+      socket.addEventListener("open", () => {
+        socket.send(JSON.stringify({ type: "join", name }));
+      });
+
+      socket.addEventListener("message", (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === "joined") {
+          joinPanel.classList.add("hidden");
+          setStatus("Connected");
+          return;
+        }
+        if (data.type === "snapshot") {
+          snapshot = data;
+          playersEl.textContent = `Players: ${data.players.length}`;
+        }
+        if (data.type === "error") {
+          setStatus(data.message || "Connection failed");
+        }
+      });
+
+      socket.addEventListener("close", () => {
+        setStatus("Disconnected");
+        joinButton.disabled = false;
+        joinPanel.classList.remove("hidden");
+      });
+
+      socket.addEventListener("error", () => {
+        setStatus("Connection error");
+      });
+    }
+
+    function sendInput() {
+      if (!socket || socket.readyState !== WebSocket.OPEN || !snapshot.you) {
+        return;
+      }
+      socket.send(JSON.stringify({
+        type: "input",
+        seq: ++sequence,
+        up: keys.up,
+        down: keys.down,
+        left: keys.left,
+        right: keys.right
+      }));
+    }
+
+    function updateKey(event, isDown) {
+      const key = event.key.toLowerCase();
+      if (key === "w" || key === "arrowup") keys.up = isDown;
+      else if (key === "s" || key === "arrowdown") keys.down = isDown;
+      else if (key === "a" || key === "arrowleft") keys.left = isDown;
+      else if (key === "d" || key === "arrowright") keys.right = isDown;
+      else return;
+
+      event.preventDefault();
+      sendInput();
+    }
+
+    function drawGrid(scaleX, scaleY) {
+      ctx.strokeStyle = "#242b36";
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= snapshot.arenaWidth; x += 80) {
+        ctx.beginPath();
+        ctx.moveTo(x * scaleX, 0);
+        ctx.lineTo(x * scaleX, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= snapshot.arenaHeight; y += 80) {
+        ctx.beginPath();
+        ctx.moveTo(0, y * scaleY);
+        ctx.lineTo(canvas.width, y * scaleY);
+        ctx.stroke();
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#161a22";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const scaleX = canvas.width / snapshot.arenaWidth;
+      const scaleY = canvas.height / snapshot.arenaHeight;
+      drawGrid(scaleX, scaleY);
+
+      for (const player of snapshot.players) {
+        const size = player.size * Math.min(scaleX, scaleY);
+        const x = player.x * scaleX - size / 2;
+        const y = player.y * scaleY - size / 2;
+        const isYou = player.id === snapshot.you;
+
+        ctx.fillStyle = player.color;
+        ctx.fillRect(x, y, size, size);
+
+        if (isYou) {
+          ctx.strokeStyle = "#f5f7fb";
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x - 3, y - 3, size + 6, size + 6);
+        }
+
+        ctx.font = "13px Segoe UI, Arial, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#f5f7fb";
+        ctx.fillText(player.name, player.x * scaleX, y - 8);
+      }
+
+      requestAnimationFrame(draw);
+    }
+
+    joinForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = nameInput.value.trim() || "Player";
+      connect(name);
+    });
+
+    window.addEventListener("keydown", (event) => updateKey(event, true));
+    window.addEventListener("keyup", (event) => updateKey(event, false));
+    window.setInterval(sendInput, 50);
+    requestAnimationFrame(draw);
+  </script>
+</body>
+</html>

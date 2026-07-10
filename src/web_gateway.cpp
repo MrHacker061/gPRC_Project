@@ -3,10 +3,12 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -15,6 +17,7 @@
 #include <utility>
 
 #include "chat.grpc.pb.h"
+#include "game.grpc.pb.h"
 
 namespace {
 
@@ -35,6 +38,15 @@ using chat::SendMessageResponse;
 using chat::SubscribeRequest;
 using chat::TypingRequest;
 using chat::TypingResponse;
+using game::GameService;
+using game::InputAck;
+using game::JoinGameRequest;
+using game::JoinGameResponse;
+using game::LeaveGameRequest;
+using game::LeaveGameResponse;
+using game::PlayerInput;
+using game::WorldRequest;
+using game::WorldSnapshot;
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::ClientReader;
@@ -144,6 +156,130 @@ std::string JsonResponse(std::initializer_list<std::pair<std::string, std::strin
   return json.str();
 }
 
+std::string JsonStringField(const std::string& json,
+                            const std::string& key,
+                            const std::string& fallback) {
+  const std::string needle = "\"" + key + "\"";
+  const std::size_t key_pos = json.find(needle);
+  if (key_pos == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t colon = json.find(':', key_pos + needle.size());
+  if (colon == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t begin = json.find('"', colon + 1);
+  if (begin == std::string::npos) {
+    return fallback;
+  }
+
+  std::string value;
+  bool escaping = false;
+  for (std::size_t i = begin + 1; i < json.size(); ++i) {
+    const char ch = json[i];
+    if (escaping) {
+      switch (ch) {
+        case 'n':
+          value += '\n';
+          break;
+        case 'r':
+          value += '\r';
+          break;
+        case 't':
+          value += '\t';
+          break;
+        default:
+          value += ch;
+          break;
+      }
+      escaping = false;
+      continue;
+    }
+    if (ch == '\\') {
+      escaping = true;
+      continue;
+    }
+    if (ch == '"') {
+      return value;
+    }
+    value += ch;
+  }
+  return fallback;
+}
+
+bool JsonBoolField(const std::string& json,
+                   const std::string& key,
+                   bool fallback) {
+  const std::string needle = "\"" + key + "\"";
+  const std::size_t key_pos = json.find(needle);
+  if (key_pos == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t colon = json.find(':', key_pos + needle.size());
+  if (colon == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t value_pos = json.find_first_not_of(" \t\r\n", colon + 1);
+  if (value_pos == std::string::npos) {
+    return fallback;
+  }
+  if (json.compare(value_pos, 4, "true") == 0) {
+    return true;
+  }
+  if (json.compare(value_pos, 5, "false") == 0) {
+    return false;
+  }
+  return fallback;
+}
+
+uint64_t JsonUInt64Field(const std::string& json,
+                         const std::string& key,
+                         uint64_t fallback) {
+  const std::string needle = "\"" + key + "\"";
+  const std::size_t key_pos = json.find(needle);
+  if (key_pos == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t colon = json.find(':', key_pos + needle.size());
+  if (colon == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t value_pos = json.find_first_of("0123456789", colon + 1);
+  if (value_pos == std::string::npos) {
+    return fallback;
+  }
+  try {
+    return static_cast<uint64_t>(std::stoull(json.substr(value_pos)));
+  } catch (...) {
+    return fallback;
+  }
+}
+
+std::string SnapshotToJson(const WorldSnapshot& snapshot,
+                           const std::string& current_player_id) {
+  std::ostringstream json;
+  json << "{\"type\":\"snapshot\"";
+  json << ",\"tick\":" << snapshot.tick();
+  json << ",\"arenaWidth\":" << snapshot.arena_width();
+  json << ",\"arenaHeight\":" << snapshot.arena_height();
+  json << ",\"you\":\"" << JsonEscape(current_player_id) << "\"";
+  json << ",\"players\":[";
+  for (int i = 0; i < snapshot.players_size(); ++i) {
+    if (i > 0) {
+      json << ",";
+    }
+    const auto& player = snapshot.players(i);
+    json << "{\"id\":\"" << JsonEscape(player.player_id()) << "\"";
+    json << ",\"name\":\"" << JsonEscape(player.display_name()) << "\"";
+    json << ",\"x\":" << player.x();
+    json << ",\"y\":" << player.y();
+    json << ",\"size\":" << player.size();
+    json << ",\"color\":\"" << JsonEscape(player.color()) << "\"}";
+  }
+  json << "]}";
+  return json.str();
+}
+
 std::string ParamOr(const httplib::Request& request,
                     const std::string& key,
                     const std::string& fallback) {
@@ -165,15 +301,25 @@ int64_t IntParamOr(const httplib::Request& request,
 int main(int argc, char** argv) {
   const std::string grpc_address = argc > 1 ? argv[1] : "localhost:50051";
   const int http_port = argc > 2 ? std::stoi(argv[2]) : 8080;
+  const std::string game_grpc_address =
+      argc > 3 ? argv[3] : "localhost:50052";
 
   auto channel =
       grpc::CreateChannel(grpc_address, grpc::InsecureChannelCredentials());
-  auto make_stub = [&] { return ChatService::NewStub(channel); };
+  auto make_chat_stub = [&] { return ChatService::NewStub(channel); };
+  auto game_channel = grpc::CreateChannel(game_grpc_address,
+                                          grpc::InsecureChannelCredentials());
+  auto make_game_stub = [&] { return GameService::NewStub(game_channel); };
 
   httplib::Server server;
 
   server.Get("/", [](const httplib::Request&, httplib::Response& response) {
     const std::string index = ReadFile(std::string(WEB_ROOT) + "/index.html");
+    response.set_content(index, "text/html; charset=utf-8");
+  });
+
+  server.Get("/game", [](const httplib::Request&, httplib::Response& response) {
+    const std::string index = ReadFile(std::string(WEB_ROOT) + "/game.html");
     response.set_content(index, "text/html; charset=utf-8");
   });
 
@@ -186,7 +332,7 @@ int main(int argc, char** argv) {
 
     JoinResponse join_response;
     ClientContext context;
-    const Status status = make_stub()->Join(&context, join_request, &join_response);
+    const Status status = make_chat_stub()->Join(&context, join_request, &join_response);
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
@@ -212,7 +358,7 @@ int main(int argc, char** argv) {
     ListRoomsRequest rooms_request;
     ListRoomsResponse rooms_response;
     ClientContext context;
-    const Status status = make_stub()->ListRooms(&context, rooms_request, &rooms_response);
+    const Status status = make_chat_stub()->ListRooms(&context, rooms_request, &rooms_response);
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
@@ -245,7 +391,7 @@ int main(int argc, char** argv) {
 
     CreateRoomResponse room_response;
     ClientContext context;
-    const Status status = make_stub()->CreateRoom(&context, room_request, &room_response);
+    const Status status = make_chat_stub()->CreateRoom(&context, room_request, &room_response);
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
@@ -273,7 +419,7 @@ int main(int argc, char** argv) {
 
     SendMessageResponse send_response;
     ClientContext context;
-    const Status status = make_stub()->SendMessage(&context, message, &send_response);
+    const Status status = make_chat_stub()->SendMessage(&context, message, &send_response);
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
@@ -302,7 +448,7 @@ int main(int argc, char** argv) {
     TypingResponse typing_response;
     ClientContext context;
     const Status status =
-        make_stub()->SendTyping(&context, typing_request, &typing_response);
+        make_chat_stub()->SendTyping(&context, typing_request, &typing_response);
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
@@ -321,7 +467,7 @@ int main(int argc, char** argv) {
     ListEventsResponse events_response;
     ClientContext context;
     const Status status =
-        make_stub()->ListEvents(&context, events_request, &events_response);
+        make_chat_stub()->ListEvents(&context, events_request, &events_response);
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
@@ -350,7 +496,7 @@ int main(int argc, char** argv) {
     GetHistoryResponse history_response;
     ClientContext context;
     const Status status =
-        make_stub()->GetHistory(&context, history_request, &history_response);
+        make_chat_stub()->GetHistory(&context, history_request, &history_response);
     if (!status.ok()) {
       response.status = 502;
       response.set_content(JsonResponse({{"error", status.error_message()}}),
@@ -397,7 +543,7 @@ int main(int argc, char** argv) {
 
           std::thread reader_thread([&] {
             std::unique_ptr<ClientReader<ChatEvent>> reader =
-                make_stub()->Subscribe(&context, subscribe_request);
+                make_chat_stub()->Subscribe(&context, subscribe_request);
 
             ChatEvent event;
             while (reader->Read(&event)) {
@@ -469,9 +615,91 @@ int main(int argc, char** argv) {
         });
   });
 
+  server.WebSocket("/game/ws", [&](const httplib::Request&,
+                                   httplib::ws::WebSocket& ws) {
+    std::string message;
+    if (ws.read(message) != httplib::ws::Text) {
+      ws.close(httplib::ws::CloseStatus::ProtocolError,
+               "Expected join message");
+      return;
+    }
+
+    JoinGameRequest join_request;
+    join_request.set_display_name(JsonStringField(message, "name", "Player"));
+
+    JoinGameResponse join_response;
+    ClientContext join_context;
+    const Status join_status =
+        make_game_stub()->JoinGame(&join_context, join_request, &join_response);
+    if (!join_status.ok() || join_response.player_id().empty()) {
+      ws.send(JsonResponse({{"type", "error"},
+                            {"message", join_status.error_message()}}));
+      ws.close(httplib::ws::CloseStatus::InternalError, "Game join failed");
+      return;
+    }
+
+    const std::string player_id = join_response.player_id();
+    ws.send(JsonResponse({{"type", "joined"},
+                          {"playerId", player_id},
+                          {"arenaWidth",
+                           std::to_string(join_response.arena_width())},
+                          {"arenaHeight",
+                           std::to_string(join_response.arena_height())}}));
+
+    ClientContext stream_context;
+    std::atomic<bool> streaming{true};
+    std::thread stream_thread([&, player_id] {
+      WorldRequest world_request;
+      world_request.set_player_id(player_id);
+      std::unique_ptr<ClientReader<WorldSnapshot>> reader =
+          make_game_stub()->StreamWorld(&stream_context, world_request);
+
+      WorldSnapshot snapshot;
+      while (streaming && reader->Read(&snapshot)) {
+        if (!ws.send(SnapshotToJson(snapshot, player_id))) {
+          break;
+        }
+      }
+      reader->Finish();
+    });
+
+    while (ws.read(message) == httplib::ws::Text) {
+      const std::string type = JsonStringField(message, "type", "");
+      if (type != "input") {
+        continue;
+      }
+
+      PlayerInput input;
+      input.set_player_id(player_id);
+      input.set_up(JsonBoolField(message, "up", false));
+      input.set_down(JsonBoolField(message, "down", false));
+      input.set_left(JsonBoolField(message, "left", false));
+      input.set_right(JsonBoolField(message, "right", false));
+      input.set_sequence(JsonUInt64Field(message, "seq", 0));
+
+      InputAck ack;
+      ClientContext input_context;
+      make_game_stub()->SendInput(&input_context, input, &ack);
+    }
+
+    streaming = false;
+    stream_context.TryCancel();
+    if (stream_thread.joinable()) {
+      stream_thread.join();
+    }
+
+    LeaveGameRequest leave_request;
+    leave_request.set_player_id(player_id);
+    LeaveGameResponse leave_response;
+    ClientContext leave_context;
+    make_game_stub()->LeaveGame(&leave_context, leave_request, &leave_response);
+  });
+
   std::cout << "Web gateway listening on http://localhost:" << http_port << "\n";
   std::cout << "Forwarding browser chat traffic to gRPC server " << grpc_address
             << "\n";
+  std::cout << "Forwarding browser game traffic to gRPC server "
+            << game_grpc_address << "\n";
 
   if (!server.listen("0.0.0.0", http_port)) {
     std::cerr << "Failed to start web gateway on port " << http_port << "\n";
@@ -480,3 +708,4 @@ int main(int argc, char** argv) {
 
   return 0;
 }
+

@@ -49,10 +49,28 @@
         color: #ffffff;
       }
 
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
       h1 {
         margin: 0;
         font-size: 22px;
         font-weight: 750;
+      }
+
+      .game-link {
+        color: #ffffff;
+        font-size: 14px;
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .game-link:hover {
+        text-decoration: underline;
       }
 
       .status {
@@ -283,7 +301,10 @@
     <main>
       <section class="chat">
         <header>
-          <h1>gRPC Chat</h1>
+          <div class="topbar">
+            <h1>gRPC Chat</h1>
+            <a class="game-link" href="/game">Box Arena</a>
+          </div>
           <div id="status" class="status">Joining...</div>
         </header>
         <div id="messages" aria-live="polite"></div>
