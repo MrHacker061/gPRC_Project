@@ -214,6 +214,10 @@
     const playerMeta = new Map();
     const playerSpeed = 230;
     const interpolationDelayMs = 100;
+    const predictionDeadZone = 2.5;
+    const movingCorrection = 0.035;
+    const idleCorrection = 0.10;
+    const predictionSnapDistance = 240;
 
     const savedName = localStorage.getItem("boxArenaName");
     if (savedName) {
@@ -359,7 +363,17 @@
           const dx = player.x - predictedSelf.x;
           const dy = player.y - predictedSelf.y;
           const distance = Math.hypot(dx, dy);
-          const correction = distance > 120 ? 1 : 0.18;
+          if (distance < predictionDeadZone) {
+            predictedSelf.size = player.size;
+            predictedSelf.color = player.color;
+            predictedSelf.name = player.name;
+            predictedSelf.id = player.id;
+            continue;
+          }
+
+          const correction = distance > predictionSnapDistance
+            ? 1
+            : (hasMovementInput() ? movingCorrection : idleCorrection);
           predictedSelf.x += dx * correction;
           predictedSelf.y += dy * correction;
           predictedSelf.size = player.size;
@@ -394,6 +408,10 @@
         dy /= length;
       }
       return { dx, dy };
+    }
+
+    function hasMovementInput() {
+      return keys.up || keys.down || keys.left || keys.right;
     }
 
     function clamp(value, min, max) {
