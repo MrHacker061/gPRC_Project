@@ -320,6 +320,7 @@ int main(int argc, char** argv) {
 
   server.Get("/game", [](const httplib::Request&, httplib::Response& response) {
     const std::string index = ReadFile(std::string(WEB_ROOT) + "/game.html");
+    response.set_header("Cache-Control", "no-store");
     response.set_content(index, "text/html; charset=utf-8");
   });
 

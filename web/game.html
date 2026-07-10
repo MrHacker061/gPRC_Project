@@ -276,18 +276,27 @@
       }));
     }
 
+    function isEditableTarget(target) {
+      return target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        target?.isContentEditable;
+    }
+
     function keyDirection(event) {
-      switch (event.code) {
-        case "KeyW":
+      const key = event.key.toLowerCase();
+      if (key === "w") return "up";
+      if (key === "s") return "down";
+      if (key === "a") return "left";
+      if (key === "d") return "right";
+
+      switch (event.key) {
         case "ArrowUp":
           return "up";
-        case "KeyS":
         case "ArrowDown":
           return "down";
-        case "KeyA":
         case "ArrowLeft":
           return "left";
-        case "KeyD":
         case "ArrowRight":
           return "right";
         default:
@@ -296,6 +305,10 @@
     }
 
     function updateKey(event, isDown) {
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
       const direction = keyDirection(event);
       if (!direction) {
         return;
