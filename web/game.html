@@ -209,15 +209,16 @@
     let sequence = 0;
     let predictedSelf = null;
     let lastFrameTime = performance.now();
+    let lastMovementInputAt = 0;
     const keys = { up: false, down: false, left: false, right: false };
     const remoteHistory = new Map();
     const playerMeta = new Map();
     const playerSpeed = 230;
     const interpolationDelayMs = 100;
-    const predictionDeadZone = 2.5;
-    const movingCorrection = 0.035;
-    const idleCorrection = 0.10;
-    const predictionSnapDistance = 240;
+    const predictionDeadZone = 5;
+    const idleCorrection = 0.035;
+    const idleCorrectionDelayMs = 120;
+    const predictionSnapDistance = 1200;
 
     const savedName = localStorage.getItem("boxArenaName");
     if (savedName) {
@@ -329,6 +330,7 @@
       event.preventDefault();
       if (keys[direction] !== isDown) {
         keys[direction] = isDown;
+        lastMovementInputAt = performance.now();
         sendInput();
       }
     }
@@ -371,9 +373,11 @@
             continue;
           }
 
+          const recentlyMoved =
+            data.receivedAt - lastMovementInputAt < idleCorrectionDelayMs;
           const correction = distance > predictionSnapDistance
             ? 1
-            : (hasMovementInput() ? movingCorrection : idleCorrection);
+            : (hasMovementInput() || recentlyMoved ? 0 : idleCorrection);
           predictedSelf.x += dx * correction;
           predictedSelf.y += dy * correction;
           predictedSelf.size = player.size;
