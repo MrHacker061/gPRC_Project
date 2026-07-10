@@ -207,7 +207,13 @@
     let playerId = "";
     let snapshot = { players: [], arenaWidth: 960, arenaHeight: 620, you: "" };
     let sequence = 0;
+    let predictedSelf = null;
+    let lastFrameTime = performance.now();
     const keys = { up: false, down: false, left: false, right: false };
+    const remoteHistory = new Map();
+    const playerMeta = new Map();
+    const playerSpeed = 230;
+    const interpolationDelayMs = 100;
 
     const savedName = localStorage.getItem("boxArenaName");
     if (savedName) {
@@ -241,8 +247,10 @@
           return;
         }
         if (data.type === "snapshot") {
+          data.receivedAt = performance.now();
           snapshot = data;
           playersEl.textContent = `Players: ${data.players.length}`;
+          ingestSnapshot(data);
         }
         if (data.type === "error") {
           setStatus(data.message || "Connection failed");
@@ -332,6 +340,114 @@
       }
     }
 
+    function ingestSnapshot(data) {
+      for (const player of data.players) {
+        playerMeta.set(player.id, player);
+        const history = remoteHistory.get(player.id) || [];
+        history.push({ ...player, time: data.receivedAt });
+        while (history.length > 8) {
+          history.shift();
+        }
+        remoteHistory.set(player.id, history);
+
+        if (player.id === playerId) {
+          if (!predictedSelf) {
+            predictedSelf = { ...player };
+            continue;
+          }
+
+          const dx = player.x - predictedSelf.x;
+          const dy = player.y - predictedSelf.y;
+          const distance = Math.hypot(dx, dy);
+          const correction = distance > 120 ? 1 : 0.18;
+          predictedSelf.x += dx * correction;
+          predictedSelf.y += dy * correction;
+          predictedSelf.size = player.size;
+          predictedSelf.color = player.color;
+          predictedSelf.name = player.name;
+          predictedSelf.id = player.id;
+        }
+      }
+
+      for (const id of Array.from(remoteHistory.keys())) {
+        if (!data.players.some((player) => player.id === id)) {
+          remoteHistory.delete(id);
+          playerMeta.delete(id);
+          if (id === playerId) {
+            predictedSelf = null;
+          }
+        }
+      }
+    }
+
+    function movementVector() {
+      let dx = 0;
+      let dy = 0;
+      if (keys.left) dx -= 1;
+      if (keys.right) dx += 1;
+      if (keys.up) dy -= 1;
+      if (keys.down) dy += 1;
+
+      const length = Math.hypot(dx, dy);
+      if (length > 0) {
+        dx /= length;
+        dy /= length;
+      }
+      return { dx, dy };
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(Math.max(value, min), max);
+    }
+
+    function updatePrediction(dt) {
+      if (!predictedSelf) {
+        return;
+      }
+      const { dx, dy } = movementVector();
+      const half = predictedSelf.size / 2;
+      predictedSelf.x = clamp(predictedSelf.x + dx * playerSpeed * dt,
+        half, snapshot.arenaWidth - half);
+      predictedSelf.y = clamp(predictedSelf.y + dy * playerSpeed * dt,
+        half, snapshot.arenaHeight - half);
+    }
+
+    function interpolatedPlayer(id, now) {
+      if (id === playerId && predictedSelf) {
+        return predictedSelf;
+      }
+
+      const history = remoteHistory.get(id) || [];
+      if (history.length === 0) {
+        return null;
+      }
+
+      const renderTime = now - interpolationDelayMs;
+      let previous = history[0];
+      let next = null;
+      for (const sample of history) {
+        if (sample.time <= renderTime) {
+          previous = sample;
+          continue;
+        }
+        next = sample;
+        break;
+      }
+
+      if (!next) {
+        return history[history.length - 1];
+      }
+
+      const span = Math.max(next.time - previous.time, 1);
+      const t = clamp((renderTime - previous.time) / span, 0, 1);
+      const meta = playerMeta.get(id) || next;
+      return {
+        ...meta,
+        x: previous.x + (next.x - previous.x) * t,
+        y: previous.y + (next.y - previous.y) * t
+      };
+    }
+
     function drawGrid(scaleX, scaleY) {
       ctx.strokeStyle = "#242b36";
       ctx.lineWidth = 1;
@@ -349,7 +465,11 @@
       }
     }
 
-    function draw() {
+    function draw(now) {
+      const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
+      lastFrameTime = now;
+      updatePrediction(dt);
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = "#161a22";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -358,11 +478,16 @@
       const scaleY = canvas.height / snapshot.arenaHeight;
       drawGrid(scaleX, scaleY);
 
-      for (const player of snapshot.players) {
+      for (const id of remoteHistory.keys()) {
+        const player = interpolatedPlayer(id, now);
+        if (!player) {
+          continue;
+        }
+
         const size = player.size * Math.min(scaleX, scaleY);
         const x = player.x * scaleX - size / 2;
         const y = player.y * scaleY - size / 2;
-        const isYou = player.id === snapshot.you;
+        const isYou = player.id === playerId;
 
         ctx.fillStyle = player.color;
         ctx.fillRect(x, y, size, size);

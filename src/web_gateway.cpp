@@ -50,6 +50,7 @@ using game::WorldSnapshot;
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::ClientReader;
+using grpc::ClientReaderWriter;
 using grpc::Status;
 
 int64_t NowUnixMs() {
@@ -647,21 +648,17 @@ int main(int argc, char** argv) {
                           {"arenaHeight",
                            std::to_string(join_response.arena_height())}}));
 
-    ClientContext stream_context;
+    ClientContext play_context;
+    std::unique_ptr<ClientReaderWriter<PlayerInput, WorldSnapshot>> play_stream =
+        make_game_stub()->Play(&play_context);
     std::atomic<bool> streaming{true};
     std::thread stream_thread([&, player_id] {
-      WorldRequest world_request;
-      world_request.set_player_id(player_id);
-      std::unique_ptr<ClientReader<WorldSnapshot>> reader =
-          make_game_stub()->StreamWorld(&stream_context, world_request);
-
       WorldSnapshot snapshot;
-      while (streaming && reader->Read(&snapshot)) {
+      while (streaming && play_stream->Read(&snapshot)) {
         if (!ws.send(SnapshotToJson(snapshot, player_id))) {
           break;
         }
       }
-      reader->Finish();
     });
 
     while (ws.read(message) == httplib::ws::Text) {
@@ -678,16 +675,18 @@ int main(int argc, char** argv) {
       input.set_right(JsonBoolField(message, "right", false));
       input.set_sequence(JsonUInt64Field(message, "seq", 0));
 
-      InputAck ack;
-      ClientContext input_context;
-      make_game_stub()->SendInput(&input_context, input, &ack);
+      if (!play_stream->Write(input)) {
+        break;
+      }
     }
 
     streaming = false;
-    stream_context.TryCancel();
+    play_stream->WritesDone();
+    play_context.TryCancel();
     if (stream_thread.joinable()) {
       stream_thread.join();
     }
+    play_stream->Finish();
 
     LeaveGameRequest leave_request;
     leave_request.set_player_id(player_id);

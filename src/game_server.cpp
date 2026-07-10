@@ -34,6 +34,7 @@ using game::WorldSnapshot;
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
+using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
 
@@ -41,7 +42,7 @@ constexpr float kArenaWidth = 960.0f;
 constexpr float kArenaHeight = 620.0f;
 constexpr float kPlayerSize = 28.0f;
 constexpr float kPlayerSpeed = 230.0f;
-constexpr auto kTickDuration = std::chrono::milliseconds(33);
+constexpr auto kTickDuration = std::chrono::milliseconds(16);
 
 std::string NormalizeDisplayName(std::string name) {
   name.erase(name.begin(),
@@ -155,23 +156,27 @@ class GameWorld {
   void Stream(ServerContext* context, ServerWriter<WorldSnapshot>* writer) {
     uint64_t last_tick = 0;
     while (!context->IsCancelled()) {
-      WorldSnapshot snapshot;
-      {
-        std::unique_lock<std::mutex> lock(mutex_);
-        changed_.wait_for(lock, std::chrono::milliseconds(250), [&] {
-          return tick_ != last_tick || !running_ || context->IsCancelled();
-        });
-        if (!running_ || context->IsCancelled()) {
-          break;
-        }
-        snapshot = SnapshotLocked();
-        last_tick = tick_;
+      WorldSnapshot snapshot = SnapshotSince(context, &last_tick);
+      if (snapshot.tick() == 0) {
+        continue;
       }
-
       if (!writer->Write(snapshot)) {
         break;
       }
     }
+  }
+
+  WorldSnapshot SnapshotSince(ServerContext* context, uint64_t* last_tick) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    changed_.wait_for(lock, std::chrono::milliseconds(250), [&] {
+      return tick_ != *last_tick || !running_ || context->IsCancelled();
+    });
+    if (!running_ || context->IsCancelled() || tick_ == *last_tick) {
+      return {};
+    }
+    WorldSnapshot snapshot = SnapshotLocked();
+    *last_tick = tick_;
+    return snapshot;
   }
 
  private:
@@ -274,6 +279,34 @@ class GameServiceImpl final : public GameService::Service {
                      const WorldRequest*,
                      ServerWriter<WorldSnapshot>* writer) override {
     world_.Stream(context, writer);
+    return Status::OK;
+  }
+
+  Status Play(ServerContext* context,
+              ServerReaderWriter<WorldSnapshot, PlayerInput>* stream) override {
+    std::atomic<bool> reading{true};
+    std::thread reader_thread([&] {
+      PlayerInput input;
+      while (stream->Read(&input)) {
+        world_.UpdateInput(input);
+      }
+      reading = false;
+    });
+
+    uint64_t last_tick = 0;
+    while (!context->IsCancelled() && reading) {
+      WorldSnapshot snapshot = world_.SnapshotSince(context, &last_tick);
+      if (snapshot.tick() == 0) {
+        continue;
+      }
+      if (!stream->Write(snapshot)) {
+        break;
+      }
+    }
+
+    if (reader_thread.joinable()) {
+      reader_thread.join();
+    }
     return Status::OK;
   }
 
