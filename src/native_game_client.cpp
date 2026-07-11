@@ -410,12 +410,7 @@ void DrawPlayer(HDC dc,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
-void Paint(HWND window) {
-  PAINTSTRUCT paint;
-  HDC dc = BeginPaint(window, &paint);
-
-  RECT client;
-  GetClientRect(window, &client);
+void DrawScene(HDC dc, const RECT& client) {
   HBRUSH background = CreateSolidBrush(RGB(17, 19, 24));
   FillRect(dc, &client, background);
   DeleteObject(background);
@@ -472,7 +467,32 @@ void Paint(HWND window) {
   if (g_client.HasPredictedSelf()) {
     DrawPlayer(dc, arena, arena_width, arena_height, g_client.Self(), true);
   }
+}
 
+void Paint(HWND window) {
+  PAINTSTRUCT paint;
+  HDC dc = BeginPaint(window, &paint);
+
+  RECT client;
+  GetClientRect(window, &client);
+  const int width = client.right - client.left;
+  const int height = client.bottom - client.top;
+  if (width <= 0 || height <= 0) {
+    EndPaint(window, &paint);
+    return;
+  }
+
+  HDC memory_dc = CreateCompatibleDC(dc);
+  HBITMAP buffer = CreateCompatibleBitmap(dc, width, height);
+  HGDIOBJ old_bitmap = SelectObject(memory_dc, buffer);
+
+  DrawScene(memory_dc, client);
+
+  BitBlt(dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
+
+  SelectObject(memory_dc, old_bitmap);
+  DeleteObject(buffer);
+  DeleteDC(memory_dc);
   EndPaint(window, &paint);
 }
 
@@ -551,6 +571,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       InvalidateRect(window, nullptr, FALSE);
       return 0;
     }
+
+    case WM_ERASEBKGND:
+      return 1;
 
     case WM_PAINT:
       Paint(window);
