@@ -75,4 +75,36 @@ localhost:50052
 - Typing indicators
 - Real-time top-down multiplayer game
 - WASD player movement
+- Native Windows gRPC game client
 - Cloudflare Tunnel support
+
+## Native Desktop Client
+
+The native Windows client connects directly to `game_server` over gRPC. It does not use `web_gateway`, WebSockets, or the browser.
+
+Build it:
+
+```powershell
+cd "C:\Users\bocaj\OneDrive\Desktop\gRPC Project\gPRC_Project"
+cmake --build build --config Release --target native_game_client
+```
+
+Run it:
+
+```powershell
+.\build\Release\native_game_client.exe
+```
+
+Use this address when the game server is running locally:
+
+```text
+127.0.0.1:50052
+```
+
+Package it into a downloadable zip:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package-native-client.ps1
+```
+
+The zip contains `native_game_client.exe`, the required DLLs, and a short `README.txt`.

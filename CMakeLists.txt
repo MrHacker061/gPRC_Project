@@ -55,6 +55,11 @@ target_link_libraries(chat_cli PRIVATE chat_proto)
 add_executable(game_server src/game_server.cpp)
 target_link_libraries(game_server PRIVATE game_proto)
 
+if(WIN32)
+    add_executable(native_game_client WIN32 src/native_game_client.cpp)
+    target_link_libraries(native_game_client PRIVATE game_proto)
+endif()
+
 add_executable(web_gateway src/web_gateway.cpp)
 target_compile_definitions(web_gateway PRIVATE WEB_ROOT="${WEB_ROOT_PATH}")
 target_link_libraries(web_gateway PRIVATE chat_proto game_proto httplib::httplib)

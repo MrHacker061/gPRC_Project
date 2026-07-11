@@ -7,3 +7,4 @@ out/
 *.db
 *.db-shm
 *.db-wal
+native_game_client.zip
