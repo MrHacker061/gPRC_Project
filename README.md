@@ -76,6 +76,7 @@ localhost:50052
 - Real-time top-down multiplayer game
 - WASD player movement
 - Mouse-aimed circular players with synchronized hands
+- Acknowledged input replay without post-movement drift
 - Native Windows gRPC game client
 - Cloudflare Tunnel support
 

@@ -207,19 +207,21 @@
     let snapshot = { players: [], arenaWidth: 960, arenaHeight: 620, you: "" };
     let sequence = 0;
     let predictedSelf = null;
+    let pendingInputs = [];
+    let inputAccumulator = 0;
+    let aimDirty = true;
     const aim = { x: 1, y: 0 };
     const pointer = { x: 0, y: 0, inside: false };
     let lastFrameTime = performance.now();
-    let lastMovementInputAt = 0;
     const keys = { up: false, down: false, left: false, right: false };
     const remoteHistory = new Map();
     const playerMeta = new Map();
     const playerSpeed = 230;
+    const inputStepSeconds = 0.016;
     const interpolationDelayMs = 100;
-    const predictionDeadZone = 5;
-    const idleCorrection = 0.035;
-    const idleCorrectionDelayMs = 120;
-    const predictionSnapDistance = 1200;
+    const reconciliationDeadZone = 1;
+    const activeCorrection = 0.35;
+    const reconciliationSnapDistance = 120;
 
     const savedName = localStorage.getItem("boxArenaName");
     if (savedName) {
@@ -232,6 +234,10 @@
 
     function connect(name) {
       localStorage.setItem("boxArenaName", name);
+      sequence = 0;
+      pendingInputs = [];
+      inputAccumulator = 0;
+      predictedSelf = null;
       joinButton.disabled = true;
       setStatus("Connecting...");
 
@@ -249,7 +255,7 @@
           snapshot.you = data.playerId;
           joinPanel.classList.add("hidden");
           setStatus("Connected");
-          sendInput();
+          sendInput(0);
           return;
         }
         if (data.type === "snapshot") {
@@ -266,6 +272,9 @@
       socket.addEventListener("close", () => {
         playerId = "";
         resetKeys();
+        pendingInputs = [];
+        inputAccumulator = 0;
+        predictedSelf = null;
         setStatus("Disconnected");
         joinButton.disabled = false;
         joinPanel.classList.remove("hidden");
@@ -276,11 +285,11 @@
       });
     }
 
-    function sendInput() {
+    function sendInput(movementSeconds = 0) {
       if (!socket || socket.readyState !== WebSocket.OPEN || !playerId) {
         return;
       }
-      socket.send(JSON.stringify({
+      const command = {
         type: "input",
         seq: ++sequence,
         up: keys.up,
@@ -288,8 +297,15 @@
         left: keys.left,
         right: keys.right,
         aimX: aim.x,
-        aimY: aim.y
-      }));
+        aimY: aim.y,
+        movementSeconds
+      };
+      if (movementSeconds > 0 && predictedSelf) {
+        applyMovement(predictedSelf, command);
+        pendingInputs.push(command);
+      }
+      socket.send(JSON.stringify(command));
+      aimDirty = false;
     }
 
     function isEditableTarget(target) {
@@ -333,8 +349,8 @@
       event.preventDefault();
       if (keys[direction] !== isDown) {
         keys[direction] = isDown;
-        lastMovementInputAt = performance.now();
-        sendInput();
+        inputAccumulator = 0;
+        sendInput(0);
       }
     }
 
@@ -344,8 +360,9 @@
       keys.down = false;
       keys.left = false;
       keys.right = false;
+      inputAccumulator = 0;
       if (hadInput) {
-        sendInput();
+        sendInput(0);
       }
     }
 
@@ -360,31 +377,37 @@
         remoteHistory.set(player.id, history);
 
         if (player.id === playerId) {
+          const acknowledgedSequence =
+            Number(player.lastProcessedInputSequence) || 0;
+          pendingInputs = pendingInputs.filter(
+            (input) => input.seq > acknowledgedSequence
+          );
+          const reconciled = {
+            ...player,
+            aimX: aim.x,
+            aimY: aim.y
+          };
+          for (const input of pendingInputs) {
+            applyMovement(reconciled, input);
+          }
+
           if (!predictedSelf) {
-            predictedSelf = { ...player, aimX: aim.x, aimY: aim.y };
+            predictedSelf = reconciled;
             continue;
           }
 
-          const dx = player.x - predictedSelf.x;
-          const dy = player.y - predictedSelf.y;
+          const dx = reconciled.x - predictedSelf.x;
+          const dy = reconciled.y - predictedSelf.y;
           const distance = Math.hypot(dx, dy);
-          if (distance < predictionDeadZone) {
-            predictedSelf.size = player.size;
-            predictedSelf.color = player.color;
-            predictedSelf.name = player.name;
-            predictedSelf.id = player.id;
-            predictedSelf.aimX = aim.x;
-            predictedSelf.aimY = aim.y;
-            continue;
+          const settled = !hasMovementInput() && pendingInputs.length === 0;
+          if (settled || distance <= reconciliationDeadZone ||
+              distance >= reconciliationSnapDistance) {
+            predictedSelf.x = reconciled.x;
+            predictedSelf.y = reconciled.y;
+          } else {
+            predictedSelf.x += dx * activeCorrection;
+            predictedSelf.y += dy * activeCorrection;
           }
-
-          const recentlyMoved =
-            data.receivedAt - lastMovementInputAt < idleCorrectionDelayMs;
-          const correction = distance > predictionSnapDistance
-            ? 1
-            : (hasMovementInput() || recentlyMoved ? 0 : idleCorrection);
-          predictedSelf.x += dx * correction;
-          predictedSelf.y += dy * correction;
           predictedSelf.size = player.size;
           predictedSelf.color = player.color;
           predictedSelf.name = player.name;
@@ -405,13 +428,13 @@
       }
     }
 
-    function movementVector() {
+    function movementVector(input = keys) {
       let dx = 0;
       let dy = 0;
-      if (keys.left) dx -= 1;
-      if (keys.right) dx += 1;
-      if (keys.up) dy -= 1;
-      if (keys.down) dy += 1;
+      if (input.left) dx -= 1;
+      if (input.right) dx += 1;
+      if (input.up) dy -= 1;
+      if (input.down) dy += 1;
 
       const length = Math.hypot(dx, dy);
       if (length > 0) {
@@ -452,22 +475,50 @@
         targetX - predictedSelf.x,
         targetY - predictedSelf.y
       );
+      if (Math.abs(aim.x - direction.x) > 0.001 ||
+          Math.abs(aim.y - direction.y) > 0.001) {
+        aimDirty = true;
+      }
       aim.x = direction.x;
       aim.y = direction.y;
       predictedSelf.aimX = aim.x;
       predictedSelf.aimY = aim.y;
     }
 
+    function applyMovement(player, input) {
+      if (!player || input.movementSeconds <= 0) {
+        return;
+      }
+      const { dx, dy } = movementVector(input);
+      const half = player.size * 0.78;
+      player.x = clamp(
+        player.x + dx * playerSpeed * input.movementSeconds,
+        half,
+        snapshot.arenaWidth - half
+      );
+      player.y = clamp(
+        player.y + dy * playerSpeed * input.movementSeconds,
+        half,
+        snapshot.arenaHeight - half
+      );
+    }
+
     function updatePrediction(dt) {
       if (!predictedSelf) {
         return;
       }
-      const { dx, dy } = movementVector();
-      const half = predictedSelf.size * 0.78;
-      predictedSelf.x = clamp(predictedSelf.x + dx * playerSpeed * dt,
-        half, snapshot.arenaWidth - half);
-      predictedSelf.y = clamp(predictedSelf.y + dy * playerSpeed * dt,
-        half, snapshot.arenaHeight - half);
+      if (hasMovementInput()) {
+        inputAccumulator = Math.min(
+          inputAccumulator + dt,
+          inputStepSeconds * 3
+        );
+        while (inputAccumulator >= inputStepSeconds) {
+          sendInput(inputStepSeconds);
+          inputAccumulator -= inputStepSeconds;
+        }
+      } else {
+        inputAccumulator = 0;
+      }
       updateAimFromPointer();
     }
 
@@ -627,7 +678,11 @@
         resetKeys();
       }
     });
-    window.setInterval(sendInput, 50);
+    window.setInterval(() => {
+      if (aimDirty) {
+        sendInput(0);
+      }
+    }, 50);
     requestAnimationFrame(draw);
   </script>
 </body>

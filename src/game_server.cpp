@@ -78,10 +78,6 @@ std::string PickColor(std::size_t index) {
 }
 
 struct InputState {
-  bool up = false;
-  bool down = false;
-  bool left = false;
-  bool right = false;
   float aim_x = 1.0f;
   float aim_y = 0.0f;
   uint64_t sequence = 0;
@@ -148,18 +144,40 @@ class GameWorld {
     if (player == players_.end()) {
       return input.sequence();
     }
-    player->second.input.up = input.up();
-    player->second.input.down = input.down();
-    player->second.input.left = input.left();
-    player->second.input.right = input.right();
+    if (input.sequence() <= player->second.input.sequence) {
+      return player->second.input.sequence;
+    }
+
     const float aim_length =
         std::hypot(input.aim_x(), input.aim_y());
     if (std::isfinite(aim_length) && aim_length > 0.001f) {
       player->second.input.aim_x = input.aim_x() / aim_length;
       player->second.input.aim_y = input.aim_y() / aim_length;
     }
+
+    const float movement_seconds = input.movement_seconds();
+    if (std::isfinite(movement_seconds) && movement_seconds > 0.0f) {
+      float dx = 0.0f;
+      float dy = 0.0f;
+      if (input.left()) dx -= 1.0f;
+      if (input.right()) dx += 1.0f;
+      if (input.up()) dy -= 1.0f;
+      if (input.down()) dy += 1.0f;
+      const float direction_length = std::hypot(dx, dy);
+      if (direction_length > 0.0f) {
+        dx /= direction_length;
+        dy /= direction_length;
+      }
+      const float safe_seconds = std::min(movement_seconds, 0.05f);
+      player->second.x = std::clamp(
+          player->second.x + dx * kPlayerSpeed * safe_seconds,
+          kPlayerBoundaryPadding, kArenaWidth - kPlayerBoundaryPadding);
+      player->second.y = std::clamp(
+          player->second.y + dy * kPlayerSpeed * safe_seconds,
+          kPlayerBoundaryPadding, kArenaHeight - kPlayerBoundaryPadding);
+    }
     player->second.input.sequence = input.sequence();
-    return input.sequence();
+    return player->second.input.sequence;
   }
 
   void Stream(ServerContext* context, ServerWriter<WorldSnapshot>* writer) {
@@ -190,45 +208,10 @@ class GameWorld {
 
  private:
   void TickLoop() {
-    auto previous = std::chrono::steady_clock::now();
     while (running_) {
       std::this_thread::sleep_for(kTickDuration);
-      const auto now = std::chrono::steady_clock::now();
-      const float dt =
-          std::chrono::duration<float>(now - previous).count();
-      previous = now;
-
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& [_, player] : players_) {
-          float dx = 0.0f;
-          float dy = 0.0f;
-          if (player.input.left) {
-            dx -= 1.0f;
-          }
-          if (player.input.right) {
-            dx += 1.0f;
-          }
-          if (player.input.up) {
-            dy -= 1.0f;
-          }
-          if (player.input.down) {
-            dy += 1.0f;
-          }
-
-          const float length = std::sqrt(dx * dx + dy * dy);
-          if (length > 0.0f) {
-            dx /= length;
-            dy /= length;
-          }
-
-          player.x = std::clamp(player.x + dx * kPlayerSpeed * dt,
-                                kPlayerBoundaryPadding,
-                                kArenaWidth - kPlayerBoundaryPadding);
-          player.y = std::clamp(player.y + dy * kPlayerSpeed * dt,
-                                kPlayerBoundaryPadding,
-                                kArenaHeight - kPlayerBoundaryPadding);
-        }
         ++tick_;
       }
       changed_.notify_all();
@@ -250,6 +233,7 @@ class GameWorld {
       state->set_color(player.color);
       state->set_aim_x(player.input.aim_x);
       state->set_aim_y(player.input.aim_y);
+      state->set_last_processed_input_sequence(player.input.sequence);
     }
     return snapshot;
   }

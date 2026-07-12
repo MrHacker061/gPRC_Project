@@ -37,6 +37,7 @@ message PlayerInput {
   uint64 sequence = 6;
   float aim_x = 7;
   float aim_y = 8;
+  float movement_seconds = 9;
 }
 
 message InputAck {
@@ -56,6 +57,7 @@ message PlayerState {
   string color = 6;
   float aim_x = 7;
   float aim_y = 8;
+  uint64 last_processed_input_sequence = 9;
 }
 
 message WorldSnapshot {

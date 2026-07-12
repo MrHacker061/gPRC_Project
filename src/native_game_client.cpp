@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -40,6 +41,10 @@ constexpr int kArenaTop = 92;
 constexpr int kMinimumWindowWidth = 640;
 constexpr int kMinimumWindowHeight = 480;
 constexpr float kPlayerSpeed = 230.0f;
+constexpr float kInputStepSeconds = 0.016f;
+constexpr float kReconciliationDeadZone = 1.0f;
+constexpr float kActiveCorrection = 0.35f;
+constexpr float kReconciliationSnapDistance = 120.0f;
 
 HWND g_server_edit = nullptr;
 HWND g_name_edit = nullptr;
@@ -56,6 +61,32 @@ struct PredictedPlayer {
   float aim_x = 1.0f;
   float aim_y = 0.0f;
 };
+
+void ApplyMovement(PredictedPlayer* player,
+                   const PlayerInput& input,
+                   float arena_width,
+                   float arena_height) {
+  if (player == nullptr || input.movement_seconds() <= 0.0f) {
+    return;
+  }
+  float dx = 0.0f;
+  float dy = 0.0f;
+  if (input.left()) dx -= 1.0f;
+  if (input.right()) dx += 1.0f;
+  if (input.up()) dy -= 1.0f;
+  if (input.down()) dy += 1.0f;
+  const float length = std::hypot(dx, dy);
+  if (length > 0.0f) {
+    dx /= length;
+    dy /= length;
+  }
+  const float seconds = std::clamp(input.movement_seconds(), 0.0f, 0.05f);
+  const float padding = player->size * 0.78f;
+  player->x = std::clamp(player->x + dx * kPlayerSpeed * seconds, padding,
+                         arena_width - padding);
+  player->y = std::clamp(player->y + dy * kPlayerSpeed * seconds, padding,
+                         arena_height - padding);
+}
 
 struct NativeRenderState {
   std::string player_id;
@@ -108,6 +139,12 @@ class NativeGameClient {
       latest_snapshot_.Clear();
       predicted_self_ = {};
       predicted_ready_ = false;
+      pending_inputs_.clear();
+    }
+    {
+      std::lock_guard<std::mutex> lock(input_mutex_);
+      sequence_ = 0;
+      input_dirty_ = false;
     }
 
     play_context_ = std::make_unique<ClientContext>();
@@ -116,7 +153,7 @@ class NativeGameClient {
     connected_ = true;
 
     reader_thread_ = std::thread([this] { ReadSnapshots(); });
-    SendInput();
+    SendInput(0.0f);
     return true;
   }
 
@@ -154,6 +191,7 @@ class NativeGameClient {
       player_id_.clear();
       latest_snapshot_.Clear();
       predicted_ready_ = false;
+      pending_inputs_.clear();
     }
 
     if (stub_ && !leaving_id.empty()) {
@@ -200,7 +238,7 @@ class NativeGameClient {
     }
 
     if (changed) {
-      SendInput();
+      SendInput(0.0f);
     }
   }
 
@@ -238,39 +276,26 @@ class NativeGameClient {
       should_send = input_dirty_;
     }
     if (should_send) {
-      SendInput();
+      SendInput(0.0f);
     }
   }
 
-  void TickPrediction(float dt) {
-    std::lock_guard<std::mutex> state_lock(state_mutex_);
-    if (!predicted_ready_) {
-      return;
-    }
-
-    PlayerInput input;
+  void AdvanceMovementStep() {
     {
-      std::lock_guard<std::mutex> input_lock(input_mutex_);
-      input = input_;
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (!predicted_ready_) {
+        return;
+      }
     }
-
-    float dx = 0.0f;
-    float dy = 0.0f;
-    if (input.left()) dx -= 1.0f;
-    if (input.right()) dx += 1.0f;
-    if (input.up()) dy -= 1.0f;
-    if (input.down()) dy += 1.0f;
-    const float length = std::sqrt(dx * dx + dy * dy);
-    if (length > 0.0f) {
-      dx /= length;
-      dy /= length;
+    bool has_movement = false;
+    {
+      std::lock_guard<std::mutex> lock(input_mutex_);
+      has_movement = input_.up() || input_.down() || input_.left() ||
+                     input_.right();
     }
-
-    const float half = predicted_self_.size * 0.78f;
-    predicted_self_.x = std::clamp(predicted_self_.x + dx * kPlayerSpeed * dt,
-                                   half, arena_width_ - half);
-    predicted_self_.y = std::clamp(predicted_self_.y + dy * kPlayerSpeed * dt,
-                                   half, arena_height_ - half);
+    if (has_movement) {
+      SendInput(kInputStepSeconds);
+    }
   }
 
   NativeRenderState CaptureRenderState() const {
@@ -286,7 +311,7 @@ class NativeGameClient {
   }
 
  private:
-  void SendInput() {
+  void SendInput(float movement_seconds) {
     if (!connected_) {
       return;
     }
@@ -296,12 +321,17 @@ class NativeGameClient {
       std::lock_guard<std::mutex> lock(input_mutex_);
       input = input_;
       input.set_sequence(++sequence_);
+      input.set_movement_seconds(movement_seconds);
       input_dirty_ = false;
     }
 
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       input.set_player_id(player_id_);
+      if (movement_seconds > 0.0f && predicted_ready_) {
+        ApplyMovement(&predicted_self_, input, arena_width_, arena_height_);
+        pending_inputs_.push_back(input);
+      }
     }
 
     std::lock_guard<std::mutex> lock(stream_mutex_);
@@ -313,6 +343,7 @@ class NativeGameClient {
   void ReadSnapshots() {
     WorldSnapshot snapshot;
     while (running_ && play_stream_ && play_stream_->Read(&snapshot)) {
+      const bool has_movement = HasMovementInput();
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         latest_snapshot_ = snapshot;
@@ -331,17 +362,34 @@ class NativeGameClient {
             predicted_self_.size = player.size();
             predicted_self_.aim_x = player.aim_x();
             predicted_self_.aim_y = player.aim_y();
+            pending_inputs_.clear();
             predicted_ready_ = true;
           } else {
-            const float dx = player.x() - predicted_self_.x;
-            const float dy = player.y() - predicted_self_.y;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            if (distance > 400.0f) {
-              predicted_self_.x = player.x();
-              predicted_self_.y = player.y();
-            } else if (!HasMovementInputLocked() && distance > 4.0f) {
-              predicted_self_.x += dx * 0.04f;
-              predicted_self_.y += dy * 0.04f;
+            while (!pending_inputs_.empty() &&
+                   pending_inputs_.front().sequence() <=
+                       player.last_processed_input_sequence()) {
+              pending_inputs_.pop_front();
+            }
+
+            PredictedPlayer reconciled = predicted_self_;
+            reconciled.x = player.x();
+            reconciled.y = player.y();
+            reconciled.size = player.size();
+            for (const auto& pending : pending_inputs_) {
+              ApplyMovement(&reconciled, pending, arena_width_, arena_height_);
+            }
+
+            const float dx = reconciled.x - predicted_self_.x;
+            const float dy = reconciled.y - predicted_self_.y;
+            const float distance = std::hypot(dx, dy);
+            const bool settled = !has_movement && pending_inputs_.empty();
+            if (settled || distance <= kReconciliationDeadZone ||
+                distance >= kReconciliationSnapDistance) {
+              predicted_self_.x = reconciled.x;
+              predicted_self_.y = reconciled.y;
+            } else {
+              predicted_self_.x += dx * kActiveCorrection;
+              predicted_self_.y += dy * kActiveCorrection;
             }
             predicted_self_.id = player.player_id();
             predicted_self_.name = player.display_name();
@@ -354,7 +402,7 @@ class NativeGameClient {
     }
   }
 
-  bool HasMovementInputLocked() const {
+  bool HasMovementInput() const {
     std::lock_guard<std::mutex> lock(input_mutex_);
     return input_.up() || input_.down() || input_.left() || input_.right();
   }
@@ -373,6 +421,7 @@ class NativeGameClient {
   std::string player_id_;
   WorldSnapshot latest_snapshot_;
   PredictedPlayer predicted_self_;
+  std::deque<PlayerInput> pending_inputs_;
   bool predicted_ready_ = false;
   float arena_width_ = 960.0f;
   float arena_height_ = 620.0f;
@@ -382,8 +431,6 @@ class NativeGameClient {
 };
 
 NativeGameClient g_client;
-std::chrono::steady_clock::time_point g_last_frame =
-    std::chrono::steady_clock::now();
 
 class PersistentBackBuffer {
  public:
@@ -728,7 +775,6 @@ void ConnectOrDisconnect(HWND window) {
 
   SetWindowTextA(g_connect_button, "Disconnect");
   SetStatus("Connected to " + WindowText(g_server_edit));
-  g_last_frame = std::chrono::steady_clock::now();
   InvalidateArena(window);
   SetFocus(window);
 }
@@ -765,7 +811,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
           "STATIC", "Disconnected",
           WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 20, 54, 560, 24, window,
           nullptr, nullptr, nullptr);
-      g_last_frame = std::chrono::steady_clock::now();
       SetTimer(window, kTimerId, 16, nullptr);
       return 0;
 
@@ -800,16 +845,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       if (wparam != kTimerId) {
         break;
       }
-      const auto now = std::chrono::steady_clock::now();
       if (g_client.IsConnected()) {
-        const float dt =
-            std::chrono::duration<float>(now - g_last_frame).count();
-        g_client.TickPrediction(std::min(dt, 0.05f));
         UpdateMouseAim(window);
         g_client.FlushInput();
+        g_client.AdvanceMovementStep();
         InvalidateArena(window);
       }
-      g_last_frame = now;
       return 0;
     }
 

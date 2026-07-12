@@ -301,7 +301,9 @@ std::string SnapshotToJson(const WorldSnapshot& snapshot,
     json << ",\"size\":" << player.size();
     json << ",\"color\":\"" << JsonEscape(player.color()) << "\"";
     json << ",\"aimX\":" << player.aim_x();
-    json << ",\"aimY\":" << player.aim_y() << "}";
+    json << ",\"aimY\":" << player.aim_y();
+    json << ",\"lastProcessedInputSequence\":"
+         << player.last_processed_input_sequence() << "}";
   }
   json << "]}";
   return json.str();
@@ -702,6 +704,8 @@ int main(int argc, char** argv) {
       input.set_sequence(JsonUInt64Field(message, "seq", 0));
       input.set_aim_x(JsonFloatField(message, "aimX", 1.0f));
       input.set_aim_y(JsonFloatField(message, "aimY", 0.0f));
+      input.set_movement_seconds(
+          JsonFloatField(message, "movementSeconds", 0.0f));
 
       if (!play_stream->Write(input)) {
         break;
