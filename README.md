@@ -75,6 +75,7 @@ localhost:50052
 - Typing indicators
 - Real-time top-down multiplayer game
 - WASD player movement
+- Mouse-aimed circular players with synchronized hands
 - Native Windows gRPC game client
 - Cloudflare Tunnel support
 

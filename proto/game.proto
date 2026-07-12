@@ -35,6 +35,8 @@ message PlayerInput {
   bool left = 4;
   bool right = 5;
   uint64 sequence = 6;
+  float aim_x = 7;
+  float aim_y = 8;
 }
 
 message InputAck {
@@ -52,6 +54,8 @@ message PlayerState {
   float y = 4;
   float size = 5;
   string color = 6;
+  float aim_x = 7;
+  float aim_y = 8;
 }
 
 message WorldSnapshot {

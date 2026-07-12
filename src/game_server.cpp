@@ -40,7 +40,8 @@ using grpc::Status;
 
 constexpr float kArenaWidth = 960.0f;
 constexpr float kArenaHeight = 620.0f;
-constexpr float kPlayerSize = 28.0f;
+constexpr float kPlayerSize = 56.0f;
+constexpr float kPlayerBoundaryPadding = kPlayerSize * 0.78f;
 constexpr float kPlayerSpeed = 230.0f;
 constexpr auto kTickDuration = std::chrono::milliseconds(16);
 
@@ -81,6 +82,8 @@ struct InputState {
   bool down = false;
   bool left = false;
   bool right = false;
+  float aim_x = 1.0f;
+  float aim_y = 0.0f;
   uint64_t sequence = 0;
 };
 
@@ -149,6 +152,12 @@ class GameWorld {
     player->second.input.down = input.down();
     player->second.input.left = input.left();
     player->second.input.right = input.right();
+    const float aim_length =
+        std::hypot(input.aim_x(), input.aim_y());
+    if (std::isfinite(aim_length) && aim_length > 0.001f) {
+      player->second.input.aim_x = input.aim_x() / aim_length;
+      player->second.input.aim_y = input.aim_y() / aim_length;
+    }
     player->second.input.sequence = input.sequence();
     return input.sequence();
   }
@@ -213,11 +222,12 @@ class GameWorld {
             dy /= length;
           }
 
-          const float half = kPlayerSize / 2.0f;
-          player.x = std::clamp(player.x + dx * kPlayerSpeed * dt, half,
-                                kArenaWidth - half);
-          player.y = std::clamp(player.y + dy * kPlayerSpeed * dt, half,
-                                kArenaHeight - half);
+          player.x = std::clamp(player.x + dx * kPlayerSpeed * dt,
+                                kPlayerBoundaryPadding,
+                                kArenaWidth - kPlayerBoundaryPadding);
+          player.y = std::clamp(player.y + dy * kPlayerSpeed * dt,
+                                kPlayerBoundaryPadding,
+                                kArenaHeight - kPlayerBoundaryPadding);
         }
         ++tick_;
       }
@@ -238,6 +248,8 @@ class GameWorld {
       state->set_y(player.y);
       state->set_size(kPlayerSize);
       state->set_color(player.color);
+      state->set_aim_x(player.input.aim_x);
+      state->set_aim_y(player.input.aim_y);
     }
     return snapshot;
   }

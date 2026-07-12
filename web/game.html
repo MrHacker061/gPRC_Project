@@ -63,13 +63,15 @@
     }
 
     canvas {
-      width: min(100%, 1180px);
-      height: min(72vh, 720px);
+      width: min(100%, 1180px, calc((100vh - 150px) * 1.5484));
+      height: auto;
+      aspect-ratio: 960 / 620;
       max-height: calc(100vh - 150px);
       background: #161a22;
       border: 1px solid #303845;
       border-radius: 8px;
       box-shadow: 0 18px 46px rgba(0, 0, 0, 0.32);
+      cursor: crosshair;
     }
 
     .join-panel {
@@ -159,9 +161,6 @@
         text-align: left;
       }
 
-      canvas {
-        height: 70vh;
-      }
     }
   </style>
 </head>
@@ -208,6 +207,8 @@
     let snapshot = { players: [], arenaWidth: 960, arenaHeight: 620, you: "" };
     let sequence = 0;
     let predictedSelf = null;
+    const aim = { x: 1, y: 0 };
+    const pointer = { x: 0, y: 0, inside: false };
     let lastFrameTime = performance.now();
     let lastMovementInputAt = 0;
     const keys = { up: false, down: false, left: false, right: false };
@@ -285,7 +286,9 @@
         up: keys.up,
         down: keys.down,
         left: keys.left,
-        right: keys.right
+        right: keys.right,
+        aimX: aim.x,
+        aimY: aim.y
       }));
     }
 
@@ -358,7 +361,7 @@
 
         if (player.id === playerId) {
           if (!predictedSelf) {
-            predictedSelf = { ...player };
+            predictedSelf = { ...player, aimX: aim.x, aimY: aim.y };
             continue;
           }
 
@@ -370,6 +373,8 @@
             predictedSelf.color = player.color;
             predictedSelf.name = player.name;
             predictedSelf.id = player.id;
+            predictedSelf.aimX = aim.x;
+            predictedSelf.aimY = aim.y;
             continue;
           }
 
@@ -384,6 +389,8 @@
           predictedSelf.color = player.color;
           predictedSelf.name = player.name;
           predictedSelf.id = player.id;
+          predictedSelf.aimX = aim.x;
+          predictedSelf.aimY = aim.y;
         }
       }
 
@@ -422,16 +429,46 @@
       return Math.min(Math.max(value, min), max);
     }
 
+    function normalizedAim(x, y) {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return { x: 1, y: 0 };
+      }
+      const length = Math.hypot(x, y);
+      if (length < 0.001) {
+        return { x: 1, y: 0 };
+      }
+      return { x: x / length, y: y / length };
+    }
+
+    function updateAimFromPointer() {
+      if (!pointer.inside || !predictedSelf) {
+        return;
+      }
+      const scaleX = canvas.width / snapshot.arenaWidth;
+      const scaleY = canvas.height / snapshot.arenaHeight;
+      const targetX = pointer.x / scaleX;
+      const targetY = pointer.y / scaleY;
+      const direction = normalizedAim(
+        targetX - predictedSelf.x,
+        targetY - predictedSelf.y
+      );
+      aim.x = direction.x;
+      aim.y = direction.y;
+      predictedSelf.aimX = aim.x;
+      predictedSelf.aimY = aim.y;
+    }
+
     function updatePrediction(dt) {
       if (!predictedSelf) {
         return;
       }
       const { dx, dy } = movementVector();
-      const half = predictedSelf.size / 2;
+      const half = predictedSelf.size * 0.78;
       predictedSelf.x = clamp(predictedSelf.x + dx * playerSpeed * dt,
         half, snapshot.arenaWidth - half);
       predictedSelf.y = clamp(predictedSelf.y + dy * playerSpeed * dt,
         half, snapshot.arenaHeight - half);
+      updateAimFromPointer();
     }
 
     function interpolatedPlayer(id, now) {
@@ -463,10 +500,16 @@
       const span = Math.max(next.time - previous.time, 1);
       const t = clamp((renderTime - previous.time) / span, 0, 1);
       const meta = playerMeta.get(id) || next;
+      const interpolatedAim = normalizedAim(
+        previous.aimX + (next.aimX - previous.aimX) * t,
+        previous.aimY + (next.aimY - previous.aimY) * t
+      );
       return {
         ...meta,
         x: previous.x + (next.x - previous.x) * t,
-        y: previous.y + (next.y - previous.y) * t
+        y: previous.y + (next.y - previous.y) * t,
+        aimX: interpolatedAim.x,
+        aimY: interpolatedAim.y
       };
     }
 
@@ -485,6 +528,53 @@
         ctx.lineTo(canvas.width, y * scaleY);
         ctx.stroke();
       }
+    }
+
+    function drawCircle(x, y, radius, fill, stroke, lineWidth) {
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      if (stroke && lineWidth > 0) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = lineWidth;
+        ctx.stroke();
+      }
+    }
+
+    function drawCharacter(player, isYou, scaleX, scaleY) {
+      const scale = Math.min(scaleX, scaleY);
+      const centerX = player.x * scaleX;
+      const centerY = player.y * scaleY;
+      const radius = player.size * scale / 2;
+      const handRadius = radius * 0.36;
+      const direction = normalizedAim(player.aimX, player.aimY);
+      const perpendicular = { x: -direction.y, y: direction.x };
+      const forward = radius * 0.78;
+      const sideways = radius * 0.84;
+      const outline = "#25282e";
+      const outlineWidth = Math.max(3, radius * 0.18);
+
+      for (const side of [-1, 1]) {
+        const handX = centerX + direction.x * forward +
+          perpendicular.x * sideways * side;
+        const handY = centerY + direction.y * forward +
+          perpendicular.y * sideways * side;
+        drawCircle(handX, handY, handRadius, player.color,
+          outline, outlineWidth);
+      }
+
+      if (isYou) {
+        drawCircle(centerX, centerY, radius + 5, "transparent",
+          "#f5f7fb", 2);
+      }
+      drawCircle(centerX, centerY, radius, player.color,
+        outline, outlineWidth);
+
+      ctx.font = "13px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#f5f7fb";
+      ctx.fillText(player.name, centerX, centerY - radius - 10);
     }
 
     function draw(now) {
@@ -506,24 +596,8 @@
           continue;
         }
 
-        const size = player.size * Math.min(scaleX, scaleY);
-        const x = player.x * scaleX - size / 2;
-        const y = player.y * scaleY - size / 2;
         const isYou = player.id === playerId;
-
-        ctx.fillStyle = player.color;
-        ctx.fillRect(x, y, size, size);
-
-        if (isYou) {
-          ctx.strokeStyle = "#f5f7fb";
-          ctx.lineWidth = 3;
-          ctx.strokeRect(x - 3, y - 3, size + 6, size + 6);
-        }
-
-        ctx.font = "13px Segoe UI, Arial, sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillStyle = "#f5f7fb";
-        ctx.fillText(player.name, player.x * scaleX, y - 8);
+        drawCharacter(player, isYou, scaleX, scaleY);
       }
 
       requestAnimationFrame(draw);
@@ -537,6 +611,16 @@
 
     window.addEventListener("keydown", (event) => updateKey(event, true));
     window.addEventListener("keyup", (event) => updateKey(event, false));
+    canvas.addEventListener("pointermove", (event) => {
+      const bounds = canvas.getBoundingClientRect();
+      pointer.x = (event.clientX - bounds.left) * canvas.width / bounds.width;
+      pointer.y = (event.clientY - bounds.top) * canvas.height / bounds.height;
+      pointer.inside = true;
+      updateAimFromPointer();
+    });
+    canvas.addEventListener("pointerleave", () => {
+      pointer.inside = false;
+    });
     window.addEventListener("blur", resetKeys);
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {

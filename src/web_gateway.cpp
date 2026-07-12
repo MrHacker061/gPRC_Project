@@ -256,6 +256,30 @@ uint64_t JsonUInt64Field(const std::string& json,
   }
 }
 
+float JsonFloatField(const std::string& json,
+                     const std::string& key,
+                     float fallback) {
+  const std::string needle = "\"" + key + "\"";
+  const std::size_t key_pos = json.find(needle);
+  if (key_pos == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t colon = json.find(':', key_pos + needle.size());
+  if (colon == std::string::npos) {
+    return fallback;
+  }
+  const std::size_t value_pos =
+      json.find_first_of("-+0123456789.", colon + 1);
+  if (value_pos == std::string::npos) {
+    return fallback;
+  }
+  try {
+    return std::stof(json.substr(value_pos));
+  } catch (...) {
+    return fallback;
+  }
+}
+
 std::string SnapshotToJson(const WorldSnapshot& snapshot,
                            const std::string& current_player_id) {
   std::ostringstream json;
@@ -275,7 +299,9 @@ std::string SnapshotToJson(const WorldSnapshot& snapshot,
     json << ",\"x\":" << player.x();
     json << ",\"y\":" << player.y();
     json << ",\"size\":" << player.size();
-    json << ",\"color\":\"" << JsonEscape(player.color()) << "\"}";
+    json << ",\"color\":\"" << JsonEscape(player.color()) << "\"";
+    json << ",\"aimX\":" << player.aim_x();
+    json << ",\"aimY\":" << player.aim_y() << "}";
   }
   json << "]}";
   return json.str();
@@ -674,6 +700,8 @@ int main(int argc, char** argv) {
       input.set_left(JsonBoolField(message, "left", false));
       input.set_right(JsonBoolField(message, "right", false));
       input.set_sequence(JsonUInt64Field(message, "seq", 0));
+      input.set_aim_x(JsonFloatField(message, "aimX", 1.0f));
+      input.set_aim_y(JsonFloatField(message, "aimY", 0.0f));
 
       if (!play_stream->Write(input)) {
         break;

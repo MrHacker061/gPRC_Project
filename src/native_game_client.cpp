@@ -53,6 +53,8 @@ struct PredictedPlayer {
   float x = 0.0f;
   float y = 0.0f;
   float size = 28.0f;
+  float aim_x = 1.0f;
+  float aim_y = 0.0f;
 };
 
 struct NativeRenderState {
@@ -66,6 +68,8 @@ struct NativeRenderState {
 
 class NativeGameClient {
  public:
+  NativeGameClient() { input_.set_aim_x(1.0f); }
+
   ~NativeGameClient() { Disconnect(); }
 
   bool IsConnected() const { return connected_; }
@@ -200,6 +204,44 @@ class NativeGameClient {
     }
   }
 
+  void SetAimDirection(float aim_x, float aim_y) {
+    const float length = std::hypot(aim_x, aim_y);
+    if (!std::isfinite(length) || length < 0.001f) {
+      return;
+    }
+    aim_x /= length;
+    aim_y /= length;
+
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (!predicted_ready_) {
+        return;
+      }
+      predicted_self_.aim_x = aim_x;
+      predicted_self_.aim_y = aim_y;
+    }
+
+    std::lock_guard<std::mutex> lock(input_mutex_);
+    if (std::abs(input_.aim_x() - aim_x) < 0.001f &&
+        std::abs(input_.aim_y() - aim_y) < 0.001f) {
+      return;
+    }
+    input_.set_aim_x(aim_x);
+    input_.set_aim_y(aim_y);
+    input_dirty_ = true;
+  }
+
+  void FlushInput() {
+    bool should_send = false;
+    {
+      std::lock_guard<std::mutex> lock(input_mutex_);
+      should_send = input_dirty_;
+    }
+    if (should_send) {
+      SendInput();
+    }
+  }
+
   void TickPrediction(float dt) {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
     if (!predicted_ready_) {
@@ -224,7 +266,7 @@ class NativeGameClient {
       dy /= length;
     }
 
-    const float half = predicted_self_.size / 2.0f;
+    const float half = predicted_self_.size * 0.78f;
     predicted_self_.x = std::clamp(predicted_self_.x + dx * kPlayerSpeed * dt,
                                    half, arena_width_ - half);
     predicted_self_.y = std::clamp(predicted_self_.y + dy * kPlayerSpeed * dt,
@@ -254,6 +296,7 @@ class NativeGameClient {
       std::lock_guard<std::mutex> lock(input_mutex_);
       input = input_;
       input.set_sequence(++sequence_);
+      input_dirty_ = false;
     }
 
     {
@@ -286,6 +329,8 @@ class NativeGameClient {
             predicted_self_.x = player.x();
             predicted_self_.y = player.y();
             predicted_self_.size = player.size();
+            predicted_self_.aim_x = player.aim_x();
+            predicted_self_.aim_y = player.aim_y();
             predicted_ready_ = true;
           } else {
             const float dx = player.x() - predicted_self_.x;
@@ -332,6 +377,7 @@ class NativeGameClient {
   float arena_width_ = 960.0f;
   float arena_height_ = 620.0f;
   PlayerInput input_;
+  bool input_dirty_ = false;
   uint64_t sequence_ = 0;
 };
 
@@ -415,6 +461,8 @@ class PersistentBackBuffer {
 };
 
 PersistentBackBuffer g_back_buffer;
+POINT g_mouse_target{};
+bool g_has_mouse_target = false;
 
 std::string WindowText(HWND window) {
   const int length = GetWindowTextLengthA(window);
@@ -464,6 +512,20 @@ void FillSolidRect(HDC dc, const RECT& rect, COLORREF color) {
   FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
 
+void FillCircle(HDC dc, int center_x, int center_y, int radius,
+                COLORREF color) {
+  if (radius <= 0) {
+    return;
+  }
+  HGDIOBJ old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
+  HGDIOBJ old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+  SetDCBrushColor(dc, color);
+  Ellipse(dc, center_x - radius, center_y - radius, center_x + radius + 1,
+          center_y + radius + 1);
+  SelectObject(dc, old_pen);
+  SelectObject(dc, old_brush);
+}
+
 void DrawPlayer(HDC dc,
                 const RECT& arena_rect,
                 float arena_width,
@@ -475,30 +537,56 @@ void DrawPlayer(HDC dc,
   const float scale_y =
       static_cast<float>(arena_rect.bottom - arena_rect.top) / arena_height;
   const float scale = std::min(scale_x, scale_y);
-  const int size =
-      std::max(1, static_cast<int>(std::lround(player.size * scale)));
-  const int x = arena_rect.left +
-                static_cast<int>(std::lround(player.x * scale_x)) - size / 2;
-  const int y = arena_rect.top +
-                static_cast<int>(std::lround(player.y * scale_y)) - size / 2;
+  const int radius =
+      std::max(1, static_cast<int>(std::lround(player.size * scale / 2.0f)));
+  const int center_x = arena_rect.left +
+                       static_cast<int>(std::lround(player.x * scale_x));
+  const int center_y = arena_rect.top +
+                       static_cast<int>(std::lround(player.y * scale_y));
 
-  RECT box{x, y, x + size, y + size};
-  FillSolidRect(dc, box, ParseColor(player.color));
+  float aim_x = player.aim_x * scale_x;
+  float aim_y = player.aim_y * scale_y;
+  const float aim_length = std::hypot(aim_x, aim_y);
+  if (!std::isfinite(aim_length) || aim_length < 0.001f) {
+    aim_x = 1.0f;
+    aim_y = 0.0f;
+  } else {
+    aim_x /= aim_length;
+    aim_y /= aim_length;
+  }
+  const float perpendicular_x = -aim_y;
+  const float perpendicular_y = aim_x;
+  const float forward = radius * 0.78f;
+  const float sideways = radius * 0.84f;
+  const int hand_radius =
+      std::max(2, static_cast<int>(std::lround(radius * 0.36f)));
+  const int outline_width =
+      std::max(2, static_cast<int>(std::lround(radius * 0.18f)));
+  const COLORREF outline = RGB(37, 40, 46);
+  const COLORREF fill = ParseColor(player.color);
+
+  for (const float side : {-1.0f, 1.0f}) {
+    const int hand_x = center_x + static_cast<int>(std::lround(
+                                      aim_x * forward +
+                                      perpendicular_x * sideways * side));
+    const int hand_y = center_y + static_cast<int>(std::lround(
+                                      aim_y * forward +
+                                      perpendicular_y * sideways * side));
+    FillCircle(dc, hand_x, hand_y, hand_radius + outline_width, outline);
+    FillCircle(dc, hand_x, hand_y, hand_radius, fill);
+  }
 
   if (is_self) {
-    SetDCBrushColor(dc, RGB(245, 247, 251));
-    HBRUSH outline_brush =
-        static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
-    RECT outline{box.left - 3, box.top - 3, box.right + 3, box.bottom + 3};
-    for (int thickness = 0; thickness < 3; ++thickness) {
-      FrameRect(dc, &outline, outline_brush);
-      InflateRect(&outline, -1, -1);
-    }
+    FillCircle(dc, center_x, center_y, radius + outline_width + 3,
+               RGB(245, 247, 251));
   }
+  FillCircle(dc, center_x, center_y, radius + outline_width, outline);
+  FillCircle(dc, center_x, center_y, radius, fill);
 
   SetTextColor(dc, RGB(245, 247, 251));
   SetBkMode(dc, TRANSPARENT);
-  RECT label{x - 60, y - 20, x + size + 60, y - 4};
+  RECT label{center_x - 80, center_y - radius - outline_width - 22,
+             center_x + 80, center_y - radius - outline_width - 4};
   DrawTextA(dc, player.name.c_str(), -1, &label,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
@@ -552,6 +640,8 @@ void DrawScene(HDC dc, const RECT& client) {
     draw_player.x = player.x();
     draw_player.y = player.y();
     draw_player.size = player.size();
+    draw_player.aim_x = player.aim_x();
+    draw_player.aim_y = player.aim_y();
     DrawPlayer(dc, arena, arena_width, arena_height, draw_player, false);
   }
 
@@ -589,6 +679,34 @@ void Paint(HWND window) {
     DrawScene(dc, client);
   }
   EndPaint(window, &paint);
+}
+
+void UpdateMouseAim(HWND window) {
+  if (!g_has_mouse_target) {
+    return;
+  }
+
+  RECT client;
+  GetClientRect(window, &client);
+  const RECT arena = ArenaRectForClient(client);
+  if (IsRectEmpty(&arena) || !PtInRect(&arena, g_mouse_target)) {
+    return;
+  }
+
+  const NativeRenderState state = g_client.CaptureRenderState();
+  if (!state.predicted_ready) {
+    return;
+  }
+  const float scale_x =
+      static_cast<float>(arena.right - arena.left) /
+      std::max(state.arena_width, 1.0f);
+  const float scale_y =
+      static_cast<float>(arena.bottom - arena.top) /
+      std::max(state.arena_height, 1.0f);
+  const float target_x = (g_mouse_target.x - arena.left) / scale_x;
+  const float target_y = (g_mouse_target.y - arena.top) / scale_y;
+  g_client.SetAimDirection(target_x - state.predicted_self.x,
+                           target_y - state.predicted_self.y);
 }
 
 void ConnectOrDisconnect(HWND window) {
@@ -666,6 +784,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       g_client.SetKey(wparam, false);
       return 0;
 
+    case WM_MOUSEMOVE: {
+      g_mouse_target.x = static_cast<short>(LOWORD(lparam));
+      g_mouse_target.y = static_cast<short>(HIWORD(lparam));
+      RECT client;
+      GetClientRect(window, &client);
+      const RECT arena = ArenaRectForClient(client);
+      g_has_mouse_target = !IsRectEmpty(&arena) &&
+                           PtInRect(&arena, g_mouse_target);
+      UpdateMouseAim(window);
+      return 0;
+    }
+
     case WM_TIMER: {
       if (wparam != kTimerId) {
         break;
@@ -675,6 +805,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
         const float dt =
             std::chrono::duration<float>(now - g_last_frame).count();
         g_client.TickPrediction(std::min(dt, 0.05f));
+        UpdateMouseAim(window);
+        g_client.FlushInput();
         InvalidateArena(window);
       }
       g_last_frame = now;
