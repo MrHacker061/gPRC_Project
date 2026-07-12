@@ -35,9 +35,12 @@ constexpr int kTimerId = 1;
 constexpr int kConnectButtonId = 1001;
 constexpr int kServerEditId = 1002;
 constexpr int kNameEditId = 1003;
+constexpr int kArenaMargin = 20;
+constexpr int kArenaTop = 92;
+constexpr int kMinimumWindowWidth = 640;
+constexpr int kMinimumWindowHeight = 480;
 constexpr float kPlayerSpeed = 230.0f;
 
-HWND g_main_window = nullptr;
 HWND g_server_edit = nullptr;
 HWND g_name_edit = nullptr;
 HWND g_connect_button = nullptr;
@@ -50,6 +53,15 @@ struct PredictedPlayer {
   float x = 0.0f;
   float y = 0.0f;
   float size = 28.0f;
+};
+
+struct NativeRenderState {
+  std::string player_id;
+  WorldSnapshot snapshot;
+  PredictedPlayer predicted_self;
+  bool predicted_ready = false;
+  float arena_width = 960.0f;
+  float arena_height = 620.0f;
 };
 
 class NativeGameClient {
@@ -219,34 +231,16 @@ class NativeGameClient {
                                    half, arena_height_ - half);
   }
 
-  WorldSnapshot Snapshot() const {
+  NativeRenderState CaptureRenderState() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    return latest_snapshot_;
-  }
-
-  PredictedPlayer Self() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return predicted_self_;
-  }
-
-  bool HasPredictedSelf() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return predicted_ready_;
-  }
-
-  std::string PlayerId() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return player_id_;
-  }
-
-  float ArenaWidth() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return arena_width_;
-  }
-
-  float ArenaHeight() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return arena_height_;
+    NativeRenderState state;
+    state.player_id = player_id_;
+    state.snapshot = latest_snapshot_;
+    state.predicted_self = predicted_self_;
+    state.predicted_ready = predicted_ready_;
+    state.arena_width = arena_width_;
+    state.arena_height = arena_height_;
+    return state;
   }
 
  private:
@@ -312,9 +306,6 @@ class NativeGameClient {
         }
       }
 
-      if (g_main_window != nullptr) {
-        InvalidateRect(g_main_window, nullptr, FALSE);
-      }
     }
   }
 
@@ -348,6 +339,83 @@ NativeGameClient g_client;
 std::chrono::steady_clock::time_point g_last_frame =
     std::chrono::steady_clock::now();
 
+class PersistentBackBuffer {
+ public:
+  ~PersistentBackBuffer() { Reset(); }
+
+  bool Ensure(HDC reference_dc, int width, int height) {
+    if (memory_dc_ != nullptr && bitmap_ != nullptr && width_ == width &&
+        height_ == height) {
+      return true;
+    }
+
+    Reset();
+    if (width <= 0 || height <= 0) {
+      return false;
+    }
+
+    memory_dc_ = CreateCompatibleDC(reference_dc);
+    if (memory_dc_ == nullptr) {
+      return false;
+    }
+
+    BITMAPINFO bitmap_info{};
+    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmap_info.bmiHeader.biWidth = width;
+    bitmap_info.bmiHeader.biHeight = -height;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+    void* pixels = nullptr;
+    bitmap_ = CreateDIBSection(reference_dc, &bitmap_info, DIB_RGB_COLORS,
+                               &pixels, nullptr, 0);
+    if (bitmap_ == nullptr || pixels == nullptr) {
+      Reset();
+      return false;
+    }
+
+    previous_bitmap_ = SelectObject(memory_dc_, bitmap_);
+    if (previous_bitmap_ == nullptr || previous_bitmap_ == HGDI_ERROR) {
+      previous_bitmap_ = nullptr;
+      Reset();
+      return false;
+    }
+
+    width_ = width;
+    height_ = height;
+    return true;
+  }
+
+  void Reset() {
+    if (memory_dc_ != nullptr && previous_bitmap_ != nullptr) {
+      SelectObject(memory_dc_, previous_bitmap_);
+    }
+    if (bitmap_ != nullptr) {
+      DeleteObject(bitmap_);
+    }
+    if (memory_dc_ != nullptr) {
+      DeleteDC(memory_dc_);
+    }
+    memory_dc_ = nullptr;
+    bitmap_ = nullptr;
+    previous_bitmap_ = nullptr;
+    width_ = 0;
+    height_ = 0;
+  }
+
+  HDC dc() const { return memory_dc_; }
+
+ private:
+  HDC memory_dc_ = nullptr;
+  HBITMAP bitmap_ = nullptr;
+  HGDIOBJ previous_bitmap_ = nullptr;
+  int width_ = 0;
+  int height_ = 0;
+};
+
+PersistentBackBuffer g_back_buffer;
+
 std::string WindowText(HWND window) {
   const int length = GetWindowTextLengthA(window);
   std::string text(static_cast<std::size_t>(length) + 1, '\0');
@@ -373,6 +441,29 @@ COLORREF ParseColor(const std::string& color) {
   return RGB((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
 }
 
+RECT ArenaRectForClient(const RECT& client) {
+  RECT arena{kArenaMargin, kArenaTop, client.right - kArenaMargin,
+             client.bottom - kArenaMargin};
+  if (arena.right <= arena.left || arena.bottom <= arena.top) {
+    SetRectEmpty(&arena);
+  }
+  return arena;
+}
+
+void InvalidateArena(HWND window) {
+  RECT client;
+  GetClientRect(window, &client);
+  const RECT arena = ArenaRectForClient(client);
+  if (!IsRectEmpty(&arena)) {
+    InvalidateRect(window, &arena, FALSE);
+  }
+}
+
+void FillSolidRect(HDC dc, const RECT& rect, COLORREF color) {
+  SetDCBrushColor(dc, color);
+  FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+}
+
 void DrawPlayer(HDC dc,
                 const RECT& arena_rect,
                 float arena_width,
@@ -384,23 +475,25 @@ void DrawPlayer(HDC dc,
   const float scale_y =
       static_cast<float>(arena_rect.bottom - arena_rect.top) / arena_height;
   const float scale = std::min(scale_x, scale_y);
-  const int size = static_cast<int>(player.size * scale);
-  const int x = arena_rect.left + static_cast<int>(player.x * scale_x) - size / 2;
-  const int y = arena_rect.top + static_cast<int>(player.y * scale_y) - size / 2;
+  const int size =
+      std::max(1, static_cast<int>(std::lround(player.size * scale)));
+  const int x = arena_rect.left +
+                static_cast<int>(std::lround(player.x * scale_x)) - size / 2;
+  const int y = arena_rect.top +
+                static_cast<int>(std::lround(player.y * scale_y)) - size / 2;
 
-  HBRUSH brush = CreateSolidBrush(ParseColor(player.color));
   RECT box{x, y, x + size, y + size};
-  FillRect(dc, &box, brush);
-  DeleteObject(brush);
+  FillSolidRect(dc, box, ParseColor(player.color));
 
   if (is_self) {
-    HPEN pen = CreatePen(PS_SOLID, 3, RGB(245, 247, 251));
-    HGDIOBJ old_pen = SelectObject(dc, pen);
-    HGDIOBJ old_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-    Rectangle(dc, box.left - 3, box.top - 3, box.right + 3, box.bottom + 3);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(pen);
+    SetDCBrushColor(dc, RGB(245, 247, 251));
+    HBRUSH outline_brush =
+        static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
+    RECT outline{box.left - 3, box.top - 3, box.right + 3, box.bottom + 3};
+    for (int thickness = 0; thickness < 3; ++thickness) {
+      FrameRect(dc, &outline, outline_brush);
+      InflateRect(&outline, -1, -1);
+    }
   }
 
   SetTextColor(dc, RGB(245, 247, 251));
@@ -411,47 +504,45 @@ void DrawPlayer(HDC dc,
 }
 
 void DrawScene(HDC dc, const RECT& client) {
-  HBRUSH background = CreateSolidBrush(RGB(17, 19, 24));
-  FillRect(dc, &client, background);
-  DeleteObject(background);
+  FillSolidRect(dc, client, RGB(17, 19, 24));
 
-  RECT arena{20, 92, client.right - 20, client.bottom - 20};
-  HBRUSH arena_brush = CreateSolidBrush(RGB(22, 26, 34));
-  FillRect(dc, &arena, arena_brush);
-  DeleteObject(arena_brush);
+  const RECT arena = ArenaRectForClient(client);
+  if (IsRectEmpty(&arena)) {
+    return;
+  }
+  FillSolidRect(dc, arena, RGB(22, 26, 34));
 
-  HPEN grid_pen = CreatePen(PS_SOLID, 1, RGB(36, 43, 54));
-  HGDIOBJ old_pen = SelectObject(dc, grid_pen);
-  const float arena_width = g_client.ArenaWidth();
-  const float arena_height = g_client.ArenaHeight();
+  const NativeRenderState state = g_client.CaptureRenderState();
+  const float arena_width = std::max(state.arena_width, 1.0f);
+  const float arena_height = std::max(state.arena_height, 1.0f);
   const float scale_x = static_cast<float>(arena.right - arena.left) / arena_width;
   const float scale_y =
       static_cast<float>(arena.bottom - arena.top) / arena_height;
+
+  HGDIOBJ old_pen = SelectObject(dc, GetStockObject(DC_PEN));
+  SetDCPenColor(dc, RGB(36, 43, 54));
   for (float x = 0.0f; x <= arena_width; x += 80.0f) {
-    const int px = arena.left + static_cast<int>(x * scale_x);
+    const int px = arena.left + static_cast<int>(std::lround(x * scale_x));
     MoveToEx(dc, px, arena.top, nullptr);
     LineTo(dc, px, arena.bottom);
   }
   for (float y = 0.0f; y <= arena_height; y += 80.0f) {
-    const int py = arena.top + static_cast<int>(y * scale_y);
+    const int py = arena.top + static_cast<int>(std::lround(y * scale_y));
     MoveToEx(dc, arena.left, py, nullptr);
     LineTo(dc, arena.right, py);
   }
   SelectObject(dc, old_pen);
-  DeleteObject(grid_pen);
 
-  HPEN border_pen = CreatePen(PS_SOLID, 1, RGB(48, 56, 69));
-  old_pen = SelectObject(dc, border_pen);
-  HGDIOBJ old_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-  Rectangle(dc, arena.left, arena.top, arena.right, arena.bottom);
-  SelectObject(dc, old_brush);
-  SelectObject(dc, old_pen);
-  DeleteObject(border_pen);
+  SetDCBrushColor(dc, RGB(48, 56, 69));
+  FrameRect(dc, &arena, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 
-  const std::string self_id = g_client.PlayerId();
-  const WorldSnapshot snapshot = g_client.Snapshot();
-  for (const auto& player : snapshot.players()) {
-    if (player.player_id() == self_id && g_client.HasPredictedSelf()) {
+  const int saved_dc = SaveDC(dc);
+  if (saved_dc != 0) {
+    IntersectClipRect(dc, arena.left + 1, arena.top + 1, arena.right - 1,
+                      arena.bottom - 1);
+  }
+  for (const auto& player : state.snapshot.players()) {
+    if (player.player_id() == state.player_id && state.predicted_ready) {
       continue;
     }
     PredictedPlayer draw_player;
@@ -464,8 +555,11 @@ void DrawScene(HDC dc, const RECT& client) {
     DrawPlayer(dc, arena, arena_width, arena_height, draw_player, false);
   }
 
-  if (g_client.HasPredictedSelf()) {
-    DrawPlayer(dc, arena, arena_width, arena_height, g_client.Self(), true);
+  if (state.predicted_ready) {
+    DrawPlayer(dc, arena, arena_width, arena_height, state.predicted_self, true);
+  }
+  if (saved_dc != 0) {
+    RestoreDC(dc, saved_dc);
   }
 }
 
@@ -482,17 +576,18 @@ void Paint(HWND window) {
     return;
   }
 
-  HDC memory_dc = CreateCompatibleDC(dc);
-  HBITMAP buffer = CreateCompatibleBitmap(dc, width, height);
-  HGDIOBJ old_bitmap = SelectObject(memory_dc, buffer);
-
-  DrawScene(memory_dc, client);
-
-  BitBlt(dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
-
-  SelectObject(memory_dc, old_bitmap);
-  DeleteObject(buffer);
-  DeleteDC(memory_dc);
+  if (g_back_buffer.Ensure(dc, width, height)) {
+    DrawScene(g_back_buffer.dc(), client);
+    const int dirty_width = paint.rcPaint.right - paint.rcPaint.left;
+    const int dirty_height = paint.rcPaint.bottom - paint.rcPaint.top;
+    if (dirty_width > 0 && dirty_height > 0) {
+      BitBlt(dc, paint.rcPaint.left, paint.rcPaint.top, dirty_width,
+             dirty_height, g_back_buffer.dc(), paint.rcPaint.left,
+             paint.rcPaint.top, SRCCOPY);
+    }
+  } else {
+    DrawScene(dc, client);
+  }
   EndPaint(window, &paint);
 }
 
@@ -501,7 +596,7 @@ void ConnectOrDisconnect(HWND window) {
     g_client.Disconnect();
     SetWindowTextA(g_connect_button, "Connect");
     SetStatus("Disconnected");
-    InvalidateRect(window, nullptr, FALSE);
+    InvalidateArena(window);
     return;
   }
 
@@ -515,6 +610,8 @@ void ConnectOrDisconnect(HWND window) {
 
   SetWindowTextA(g_connect_button, "Disconnect");
   SetStatus("Connected to " + WindowText(g_server_edit));
+  g_last_frame = std::chrono::steady_clock::now();
+  InvalidateArena(window);
   SetFocus(window);
 }
 
@@ -522,28 +619,35 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
                             LPARAM lparam) {
   switch (message) {
     case WM_CREATE:
-      CreateWindowA("STATIC", "Server", WS_CHILD | WS_VISIBLE, 20, 18, 52, 20,
+      CreateWindowA("STATIC", "Server",
+                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 20, 18, 52, 20,
                     window, nullptr, nullptr, nullptr);
       g_server_edit = CreateWindowA(
           "EDIT", "127.0.0.1:50052",
-          WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 76, 14, 180, 26,
-          window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerEditId)),
-          nullptr, nullptr);
-      CreateWindowA("STATIC", "Name", WS_CHILD | WS_VISIBLE, 270, 18, 42, 20,
+          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_BORDER | ES_AUTOHSCROLL,
+          76, 14, 180, 26, window,
+          reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerEditId)), nullptr,
+          nullptr);
+      CreateWindowA("STATIC", "Name",
+                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 270, 18, 42, 20,
                     window, nullptr, nullptr, nullptr);
       g_name_edit = CreateWindowA(
           "EDIT", "Native Player",
-          WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 316, 14, 150, 26,
-          window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNameEditId)),
-          nullptr, nullptr);
+          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_BORDER | ES_AUTOHSCROLL,
+          316, 14, 150, 26, window,
+          reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNameEditId)), nullptr,
+          nullptr);
       g_connect_button = CreateWindowA(
-          "BUTTON", "Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 480, 13,
-          110, 28, window,
+          "BUTTON", "Connect",
+          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_PUSHBUTTON, 480, 13, 110,
+          28, window,
           reinterpret_cast<HMENU>(static_cast<INT_PTR>(kConnectButtonId)),
           nullptr, nullptr);
-      g_status_label = CreateWindowA("STATIC", "Disconnected",
-                                     WS_CHILD | WS_VISIBLE, 20, 54, 560, 24,
-                                     window, nullptr, nullptr, nullptr);
+      g_status_label = CreateWindowA(
+          "STATIC", "Disconnected",
+          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 20, 54, 560, 24, window,
+          nullptr, nullptr, nullptr);
+      g_last_frame = std::chrono::steady_clock::now();
       SetTimer(window, kTimerId, 16, nullptr);
       return 0;
 
@@ -563,14 +667,38 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       return 0;
 
     case WM_TIMER: {
+      if (wparam != kTimerId) {
+        break;
+      }
       const auto now = std::chrono::steady_clock::now();
-      const float dt =
-          std::chrono::duration<float>(now - g_last_frame).count();
+      if (g_client.IsConnected()) {
+        const float dt =
+            std::chrono::duration<float>(now - g_last_frame).count();
+        g_client.TickPrediction(std::min(dt, 0.05f));
+        InvalidateArena(window);
+      }
       g_last_frame = now;
-      g_client.TickPrediction(std::min(dt, 0.05f));
-      InvalidateRect(window, nullptr, FALSE);
       return 0;
     }
+
+    case WM_GETMINMAXINFO: {
+      auto* min_max = reinterpret_cast<MINMAXINFO*>(lparam);
+      min_max->ptMinTrackSize.x = kMinimumWindowWidth;
+      min_max->ptMinTrackSize.y = kMinimumWindowHeight;
+      return 0;
+    }
+
+    case WM_SIZE:
+      if (wparam != SIZE_MINIMIZED) {
+        g_back_buffer.Reset();
+        InvalidateRect(window, nullptr, FALSE);
+      }
+      return 0;
+
+    case WM_DISPLAYCHANGE:
+      g_back_buffer.Reset();
+      InvalidateRect(window, nullptr, FALSE);
+      return 0;
 
     case WM_ERASEBKGND:
       return 1;
@@ -582,6 +710,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
     case WM_DESTROY:
       KillTimer(window, kTimerId);
       g_client.Disconnect();
+      g_back_buffer.Reset();
       PostQuitMessage(0);
       return 0;
   }
@@ -598,7 +727,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show_command) {
   window_class.hInstance = instance;
   window_class.lpszClassName = class_name;
   window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
-  window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+  window_class.hbrBackground = nullptr;
 
   if (!RegisterClassA(&window_class)) {
     MessageBoxA(nullptr, "Could not register window class.", "Box Arena",
@@ -606,18 +735,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show_command) {
     return 1;
   }
 
-  g_main_window = CreateWindowExA(
+  HWND main_window = CreateWindowExA(
       0, class_name, "Box Arena Native gRPC Client",
-      WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 720,
-      nullptr, nullptr, instance, nullptr);
+      WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1000,
+      720, nullptr, nullptr, instance, nullptr);
 
-  if (g_main_window == nullptr) {
+  if (main_window == nullptr) {
     MessageBoxA(nullptr, "Could not create main window.", "Box Arena",
                 MB_ICONERROR);
     return 1;
   }
 
-  ShowWindow(g_main_window, show_command);
+  ShowWindow(main_window, show_command);
+  UpdateWindow(main_window);
 
   MSG message{};
   while (GetMessageA(&message, nullptr, 0, 0) > 0) {
