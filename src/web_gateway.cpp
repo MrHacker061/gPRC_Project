@@ -353,6 +353,14 @@ int main(int argc, char** argv) {
     response.set_content(index, "text/html; charset=utf-8");
   });
 
+  server.Get("/assets/arena-ground.png",
+             [](const httplib::Request&, httplib::Response& response) {
+    const std::string image =
+        ReadFile(std::string(WEB_ROOT) + "/assets/arena-ground.png");
+    response.set_header("Cache-Control", "public, max-age=86400");
+    response.set_content(image, "image/png");
+  });
+
   server.Post("/join", [&](const httplib::Request& request,
                            httplib::Response& response) {
     JoinRequest join_request;

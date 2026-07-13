@@ -195,6 +195,8 @@
   <script>
     const canvas = document.getElementById("arena");
     const ctx = canvas.getContext("2d");
+    const arenaBackground = new Image();
+    arenaBackground.src = "/assets/arena-ground.png";
     const statusEl = document.getElementById("status");
     const playersEl = document.getElementById("players");
     const joinPanel = document.getElementById("joinPanel");
@@ -216,7 +218,8 @@
     const keys = { up: false, down: false, left: false, right: false };
     const remoteHistory = new Map();
     const playerMeta = new Map();
-    const playerSpeed = 230;
+    const playerSpeed = 320;
+    const backgroundTileSize = 800;
     const cameraViewWidth = 960;
     const cameraViewHeight = 620;
     const inputStepSeconds = 0.016;
@@ -581,7 +584,7 @@
     }
 
     function drawGrid(camera, scaleX, scaleY) {
-      ctx.strokeStyle = "#242b36";
+      ctx.strokeStyle = "rgba(31, 43, 32, 0.34)";
       ctx.lineWidth = 1;
       const firstX = Math.floor(camera.x / 80) * 80;
       const firstY = Math.floor(camera.y / 80) * 80;
@@ -598,6 +601,73 @@
         ctx.moveTo(0, screenY);
         ctx.lineTo(canvas.width, screenY);
         ctx.stroke();
+      }
+    }
+
+    function drawBackground(camera, scaleX, scaleY) {
+      ctx.fillStyle = "#566b3d";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (!arenaBackground.complete || !arenaBackground.naturalWidth) {
+        return;
+      }
+
+      const firstX = Math.floor(camera.x / backgroundTileSize) * backgroundTileSize;
+      const firstY = Math.floor(camera.y / backgroundTileSize) * backgroundTileSize;
+      for (let worldY = firstY;
+           worldY < camera.y + camera.height;
+           worldY += backgroundTileSize) {
+        for (let worldX = firstX;
+             worldX < camera.x + camera.width;
+             worldX += backgroundTileSize) {
+          ctx.drawImage(
+            arenaBackground,
+            (worldX - camera.x) * scaleX,
+            (worldY - camera.y) * scaleY,
+            backgroundTileSize * scaleX + 1,
+            backgroundTileSize * scaleY + 1
+          );
+        }
+      }
+      ctx.fillStyle = "rgba(12, 18, 14, 0.18)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function drawMinimap(camera, now) {
+      const width = 184;
+      const height = width * snapshot.arenaHeight / snapshot.arenaWidth;
+      const x = canvas.width - width - 16;
+      const y = 16;
+
+      ctx.fillStyle = "rgba(12, 16, 14, 0.84)";
+      ctx.fillRect(x, y, width, height);
+      ctx.strokeStyle = "rgba(245, 247, 251, 0.72)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, width, height);
+
+      ctx.strokeStyle = "rgba(245, 247, 251, 0.58)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(
+        x + camera.x / snapshot.arenaWidth * width,
+        y + camera.y / snapshot.arenaHeight * height,
+        camera.width / snapshot.arenaWidth * width,
+        camera.height / snapshot.arenaHeight * height
+      );
+
+      for (const id of remoteHistory.keys()) {
+        const player = id === playerId && predictedSelf
+          ? predictedSelf
+          : interpolatedPlayer(id, now);
+        if (!player) {
+          continue;
+        }
+        drawCircle(
+          x + player.x / snapshot.arenaWidth * width,
+          y + player.y / snapshot.arenaHeight * height,
+          id === playerId ? 4 : 3,
+          player.color,
+          id === playerId ? "#f5f7fb" : "#25282e",
+          1
+        );
       }
     }
 
@@ -653,13 +723,10 @@
       lastFrameTime = now;
       updatePrediction(dt);
 
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = "#161a22";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
       const camera = currentCamera();
       const scaleX = canvas.width / camera.width;
       const scaleY = canvas.height / camera.height;
+      drawBackground(camera, scaleX, scaleY);
       drawGrid(camera, scaleX, scaleY);
 
       for (const id of remoteHistory.keys()) {
@@ -678,6 +745,8 @@
         const isYou = player.id === playerId;
         drawCharacter(player, isYou, camera, scaleX, scaleY);
       }
+
+      drawMinimap(camera, now);
 
       requestAnimationFrame(draw);
     }

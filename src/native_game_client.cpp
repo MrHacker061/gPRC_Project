@@ -40,7 +40,7 @@ constexpr int kArenaMargin = 20;
 constexpr int kArenaTop = 92;
 constexpr int kMinimumWindowWidth = 640;
 constexpr int kMinimumWindowHeight = 480;
-constexpr float kPlayerSpeed = 230.0f;
+constexpr float kPlayerSpeed = 320.0f;
 constexpr float kCameraViewWidth = 960.0f;
 constexpr float kCameraViewHeight = 620.0f;
 constexpr float kInputStepSeconds = 0.016f;
@@ -664,6 +664,55 @@ void DrawPlayer(HDC dc,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+void DrawMinimap(HDC dc,
+                 const RECT& arena,
+                 const NativeRenderState& state,
+                 const CameraView& camera) {
+  constexpr int kMapWidth = 184;
+  constexpr int kMapMargin = 16;
+  const float world_width = std::max(state.arena_width, 1.0f);
+  const float world_height = std::max(state.arena_height, 1.0f);
+  const int map_height = std::max(
+      1, static_cast<int>(std::lround(kMapWidth * world_height / world_width)));
+  const RECT map{arena.right - kMapWidth - kMapMargin,
+                 arena.top + kMapMargin,
+                 arena.right - kMapMargin,
+                 arena.top + kMapMargin + map_height};
+
+  FillSolidRect(dc, map, RGB(20, 27, 22));
+  SetDCBrushColor(dc, RGB(205, 214, 209));
+  FrameRect(dc, &map, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+
+  RECT view{
+      map.left + static_cast<int>(std::lround(camera.x / world_width * kMapWidth)),
+      map.top + static_cast<int>(std::lround(camera.y / world_height * map_height)),
+      map.left + static_cast<int>(std::lround(
+                     (camera.x + camera.width) / world_width * kMapWidth)),
+      map.top + static_cast<int>(std::lround(
+                    (camera.y + camera.height) / world_height * map_height))};
+  SetDCBrushColor(dc, RGB(122, 136, 128));
+  FrameRect(dc, &view, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+
+  for (const auto& player : state.snapshot.players()) {
+    const bool is_self = player.player_id() == state.player_id;
+    const float world_x = is_self && state.predicted_ready
+                              ? state.predicted_self.x
+                              : player.x();
+    const float world_y = is_self && state.predicted_ready
+                              ? state.predicted_self.y
+                              : player.y();
+    const int marker_x = map.left + static_cast<int>(
+                                      std::lround(world_x / world_width * kMapWidth));
+    const int marker_y = map.top + static_cast<int>(
+                                     std::lround(world_y / world_height * map_height));
+    if (is_self) {
+      FillCircle(dc, marker_x, marker_y, 5, RGB(245, 247, 251));
+    }
+    FillCircle(dc, marker_x, marker_y, is_self ? 3 : 2,
+               ParseColor(player.color()));
+  }
+}
+
 void DrawScene(HDC dc, const RECT& client) {
   FillSolidRect(dc, client, RGB(17, 19, 24));
 
@@ -735,6 +784,7 @@ void DrawScene(HDC dc, const RECT& client) {
   if (saved_dc != 0) {
     RestoreDC(dc, saved_dc);
   }
+  DrawMinimap(dc, arena, state, camera);
 }
 
 void Paint(HWND window) {

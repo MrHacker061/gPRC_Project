@@ -44,7 +44,7 @@ constexpr float kSpawnCameraHalfWidth = 480.0f;
 constexpr float kSpawnCameraHalfHeight = 310.0f;
 constexpr float kPlayerSize = 56.0f;
 constexpr float kPlayerBoundaryPadding = kPlayerSize * 0.78f;
-constexpr float kPlayerSpeed = 230.0f;
+constexpr float kPlayerSpeed = 320.0f;
 constexpr auto kTickDuration = std::chrono::milliseconds(16);
 
 std::string NormalizeDisplayName(std::string name) {
