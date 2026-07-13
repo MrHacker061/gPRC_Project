@@ -38,8 +38,10 @@ using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
 
-constexpr float kArenaWidth = 960.0f;
-constexpr float kArenaHeight = 620.0f;
+constexpr float kArenaWidth = 3200.0f;
+constexpr float kArenaHeight = 2000.0f;
+constexpr float kSpawnCameraHalfWidth = 480.0f;
+constexpr float kSpawnCameraHalfHeight = 310.0f;
 constexpr float kPlayerSize = 56.0f;
 constexpr float kPlayerBoundaryPadding = kPlayerSize * 0.78f;
 constexpr float kPlayerSpeed = 230.0f;
@@ -112,9 +114,10 @@ class GameWorld {
     player.display_name = NormalizeDisplayName(request.display_name());
     player.color = PickColor(next_color_++);
 
-    const float padding = 64.0f;
-    std::uniform_real_distribution<float> spawn_x(padding, kArenaWidth - padding);
-    std::uniform_real_distribution<float> spawn_y(padding, kArenaHeight - padding);
+    std::uniform_real_distribution<float> spawn_x(
+        kSpawnCameraHalfWidth, kArenaWidth - kSpawnCameraHalfWidth);
+    std::uniform_real_distribution<float> spawn_y(
+        kSpawnCameraHalfHeight, kArenaHeight - kSpawnCameraHalfHeight);
     player.x = spawn_x(rng_);
     player.y = spawn_y(rng_);
 

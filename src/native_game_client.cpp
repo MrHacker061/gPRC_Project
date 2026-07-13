@@ -41,6 +41,8 @@ constexpr int kArenaTop = 92;
 constexpr int kMinimumWindowWidth = 640;
 constexpr int kMinimumWindowHeight = 480;
 constexpr float kPlayerSpeed = 230.0f;
+constexpr float kCameraViewWidth = 960.0f;
+constexpr float kCameraViewHeight = 620.0f;
 constexpr float kInputStepSeconds = 0.016f;
 constexpr float kReconciliationDeadZone = 1.0f;
 constexpr float kActiveCorrection = 0.35f;
@@ -96,6 +98,29 @@ struct NativeRenderState {
   float arena_width = 960.0f;
   float arena_height = 620.0f;
 };
+
+struct CameraView {
+  float x = 0.0f;
+  float y = 0.0f;
+  float width = kCameraViewWidth;
+  float height = kCameraViewHeight;
+};
+
+CameraView CameraForState(const NativeRenderState& state) {
+  CameraView camera;
+  camera.width = std::min(kCameraViewWidth, std::max(state.arena_width, 1.0f));
+  camera.height =
+      std::min(kCameraViewHeight, std::max(state.arena_height, 1.0f));
+  const float focus_x =
+      state.predicted_ready ? state.predicted_self.x : camera.width / 2.0f;
+  const float focus_y =
+      state.predicted_ready ? state.predicted_self.y : camera.height / 2.0f;
+  camera.x = std::clamp(focus_x - camera.width / 2.0f, 0.0f,
+                        std::max(state.arena_width - camera.width, 0.0f));
+  camera.y = std::clamp(focus_y - camera.height / 2.0f, 0.0f,
+                        std::max(state.arena_height - camera.height, 0.0f));
+  return camera;
+}
 
 class NativeGameClient {
  public:
@@ -575,21 +600,22 @@ void FillCircle(HDC dc, int center_x, int center_y, int radius,
 
 void DrawPlayer(HDC dc,
                 const RECT& arena_rect,
-                float arena_width,
-                float arena_height,
+                const CameraView& camera,
                 const PredictedPlayer& player,
                 bool is_self) {
   const float scale_x =
-      static_cast<float>(arena_rect.right - arena_rect.left) / arena_width;
+      static_cast<float>(arena_rect.right - arena_rect.left) / camera.width;
   const float scale_y =
-      static_cast<float>(arena_rect.bottom - arena_rect.top) / arena_height;
+      static_cast<float>(arena_rect.bottom - arena_rect.top) / camera.height;
   const float scale = std::min(scale_x, scale_y);
   const int radius =
       std::max(1, static_cast<int>(std::lround(player.size * scale / 2.0f)));
   const int center_x = arena_rect.left +
-                       static_cast<int>(std::lround(player.x * scale_x));
+                       static_cast<int>(std::lround(
+                           (player.x - camera.x) * scale_x));
   const int center_y = arena_rect.top +
-                       static_cast<int>(std::lround(player.y * scale_y));
+                       static_cast<int>(std::lround(
+                           (player.y - camera.y) * scale_y));
 
   float aim_x = player.aim_x * scale_x;
   float aim_y = player.aim_y * scale_y;
@@ -648,21 +674,25 @@ void DrawScene(HDC dc, const RECT& client) {
   FillSolidRect(dc, arena, RGB(22, 26, 34));
 
   const NativeRenderState state = g_client.CaptureRenderState();
-  const float arena_width = std::max(state.arena_width, 1.0f);
-  const float arena_height = std::max(state.arena_height, 1.0f);
-  const float scale_x = static_cast<float>(arena.right - arena.left) / arena_width;
+  const CameraView camera = CameraForState(state);
+  const float scale_x =
+      static_cast<float>(arena.right - arena.left) / camera.width;
   const float scale_y =
-      static_cast<float>(arena.bottom - arena.top) / arena_height;
+      static_cast<float>(arena.bottom - arena.top) / camera.height;
 
   HGDIOBJ old_pen = SelectObject(dc, GetStockObject(DC_PEN));
   SetDCPenColor(dc, RGB(36, 43, 54));
-  for (float x = 0.0f; x <= arena_width; x += 80.0f) {
-    const int px = arena.left + static_cast<int>(std::lround(x * scale_x));
+  const float first_x = std::floor(camera.x / 80.0f) * 80.0f;
+  const float first_y = std::floor(camera.y / 80.0f) * 80.0f;
+  for (float x = first_x; x <= camera.x + camera.width; x += 80.0f) {
+    const int px = arena.left +
+                   static_cast<int>(std::lround((x - camera.x) * scale_x));
     MoveToEx(dc, px, arena.top, nullptr);
     LineTo(dc, px, arena.bottom);
   }
-  for (float y = 0.0f; y <= arena_height; y += 80.0f) {
-    const int py = arena.top + static_cast<int>(std::lround(y * scale_y));
+  for (float y = first_y; y <= camera.y + camera.height; y += 80.0f) {
+    const int py = arena.top +
+                   static_cast<int>(std::lround((y - camera.y) * scale_y));
     MoveToEx(dc, arena.left, py, nullptr);
     LineTo(dc, arena.right, py);
   }
@@ -689,11 +719,18 @@ void DrawScene(HDC dc, const RECT& client) {
     draw_player.size = player.size();
     draw_player.aim_x = player.aim_x();
     draw_player.aim_y = player.aim_y();
-    DrawPlayer(dc, arena, arena_width, arena_height, draw_player, false);
+    const float margin = draw_player.size;
+    if (draw_player.x + margin < camera.x ||
+        draw_player.x - margin > camera.x + camera.width ||
+        draw_player.y + margin < camera.y ||
+        draw_player.y - margin > camera.y + camera.height) {
+      continue;
+    }
+    DrawPlayer(dc, arena, camera, draw_player, false);
   }
 
   if (state.predicted_ready) {
-    DrawPlayer(dc, arena, arena_width, arena_height, state.predicted_self, true);
+    DrawPlayer(dc, arena, camera, state.predicted_self, true);
   }
   if (saved_dc != 0) {
     RestoreDC(dc, saved_dc);
@@ -744,14 +781,15 @@ void UpdateMouseAim(HWND window) {
   if (!state.predicted_ready) {
     return;
   }
+  const CameraView camera = CameraForState(state);
   const float scale_x =
-      static_cast<float>(arena.right - arena.left) /
-      std::max(state.arena_width, 1.0f);
+      static_cast<float>(arena.right - arena.left) / camera.width;
   const float scale_y =
-      static_cast<float>(arena.bottom - arena.top) /
-      std::max(state.arena_height, 1.0f);
-  const float target_x = (g_mouse_target.x - arena.left) / scale_x;
-  const float target_y = (g_mouse_target.y - arena.top) / scale_y;
+      static_cast<float>(arena.bottom - arena.top) / camera.height;
+  const float target_x =
+      camera.x + (g_mouse_target.x - arena.left) / scale_x;
+  const float target_y =
+      camera.y + (g_mouse_target.y - arena.top) / scale_y;
   g_client.SetAimDirection(target_x - state.predicted_self.x,
                            target_y - state.predicted_self.y);
 }

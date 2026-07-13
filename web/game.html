@@ -217,6 +217,8 @@
     const remoteHistory = new Map();
     const playerMeta = new Map();
     const playerSpeed = 230;
+    const cameraViewWidth = 960;
+    const cameraViewHeight = 620;
     const inputStepSeconds = 0.016;
     const interpolationDelayMs = 100;
     const reconciliationDeadZone = 1;
@@ -463,14 +465,28 @@
       return { x: x / length, y: y / length };
     }
 
+    function currentCamera() {
+      const width = Math.min(cameraViewWidth, snapshot.arenaWidth);
+      const height = Math.min(cameraViewHeight, snapshot.arenaHeight);
+      const focusX = predictedSelf ? predictedSelf.x : width / 2;
+      const focusY = predictedSelf ? predictedSelf.y : height / 2;
+      return {
+        x: clamp(focusX - width / 2, 0, snapshot.arenaWidth - width),
+        y: clamp(focusY - height / 2, 0, snapshot.arenaHeight - height),
+        width,
+        height
+      };
+    }
+
     function updateAimFromPointer() {
       if (!pointer.inside || !predictedSelf) {
         return;
       }
-      const scaleX = canvas.width / snapshot.arenaWidth;
-      const scaleY = canvas.height / snapshot.arenaHeight;
-      const targetX = pointer.x / scaleX;
-      const targetY = pointer.y / scaleY;
+      const camera = currentCamera();
+      const scaleX = canvas.width / camera.width;
+      const scaleY = canvas.height / camera.height;
+      const targetX = camera.x + pointer.x / scaleX;
+      const targetY = camera.y + pointer.y / scaleY;
       const direction = normalizedAim(
         targetX - predictedSelf.x,
         targetY - predictedSelf.y
@@ -564,19 +580,23 @@
       };
     }
 
-    function drawGrid(scaleX, scaleY) {
+    function drawGrid(camera, scaleX, scaleY) {
       ctx.strokeStyle = "#242b36";
       ctx.lineWidth = 1;
-      for (let x = 0; x <= snapshot.arenaWidth; x += 80) {
+      const firstX = Math.floor(camera.x / 80) * 80;
+      const firstY = Math.floor(camera.y / 80) * 80;
+      for (let x = firstX; x <= camera.x + camera.width; x += 80) {
+        const screenX = (x - camera.x) * scaleX;
         ctx.beginPath();
-        ctx.moveTo(x * scaleX, 0);
-        ctx.lineTo(x * scaleX, canvas.height);
+        ctx.moveTo(screenX, 0);
+        ctx.lineTo(screenX, canvas.height);
         ctx.stroke();
       }
-      for (let y = 0; y <= snapshot.arenaHeight; y += 80) {
+      for (let y = firstY; y <= camera.y + camera.height; y += 80) {
+        const screenY = (y - camera.y) * scaleY;
         ctx.beginPath();
-        ctx.moveTo(0, y * scaleY);
-        ctx.lineTo(canvas.width, y * scaleY);
+        ctx.moveTo(0, screenY);
+        ctx.lineTo(canvas.width, screenY);
         ctx.stroke();
       }
     }
@@ -593,10 +613,10 @@
       }
     }
 
-    function drawCharacter(player, isYou, scaleX, scaleY) {
+    function drawCharacter(player, isYou, camera, scaleX, scaleY) {
       const scale = Math.min(scaleX, scaleY);
-      const centerX = player.x * scaleX;
-      const centerY = player.y * scaleY;
+      const centerX = (player.x - camera.x) * scaleX;
+      const centerY = (player.y - camera.y) * scaleY;
       const radius = player.size * scale / 2;
       const handRadius = radius * 0.36;
       const direction = normalizedAim(player.aimX, player.aimY);
@@ -637,18 +657,26 @@
       ctx.fillStyle = "#161a22";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      const scaleX = canvas.width / snapshot.arenaWidth;
-      const scaleY = canvas.height / snapshot.arenaHeight;
-      drawGrid(scaleX, scaleY);
+      const camera = currentCamera();
+      const scaleX = canvas.width / camera.width;
+      const scaleY = canvas.height / camera.height;
+      drawGrid(camera, scaleX, scaleY);
 
       for (const id of remoteHistory.keys()) {
         const player = interpolatedPlayer(id, now);
         if (!player) {
           continue;
         }
+        const margin = player.size;
+        if (player.x + margin < camera.x ||
+            player.x - margin > camera.x + camera.width ||
+            player.y + margin < camera.y ||
+            player.y - margin > camera.y + camera.height) {
+          continue;
+        }
 
         const isYou = player.id === playerId;
-        drawCharacter(player, isYou, scaleX, scaleY);
+        drawCharacter(player, isYou, camera, scaleX, scaleY);
       }
 
       requestAnimationFrame(draw);
