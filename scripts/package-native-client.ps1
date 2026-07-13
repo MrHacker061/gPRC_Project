@@ -38,6 +38,7 @@ Box Arena Native gRPC Client
    127.0.0.1:50052
 4. Enter a name and click Connect.
 5. Move with WASD or arrow keys.
+6. Aim with the mouse and left-click nearby rocks to mine stone.
 
 This native client connects directly to game_server with gRPC. It does not use web_gateway.
 "@ | Set-Content -LiteralPath (Join-Path $PackageDir "README.txt")

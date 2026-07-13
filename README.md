@@ -78,9 +78,14 @@ localhost:50052
 - Mouse-aimed circular players with synchronized hands
 - Large scrolling arena with a camera centered on each player
 - Illustrated arena ground, faster movement, and a live minimap
+- Hammer hotbar, mineable rocks, and synchronized stone resources
 - Acknowledged input replay without post-movement drift
 - Native Windows gRPC game client
 - Cloudflare Tunnel support
+
+In the arena, move with WASD or the arrow keys. Aim with the mouse and mine a
+nearby rock with left click; browser players can also press Space. Each valid
+hammer hit adds one stone, and depleted rocks respawn after eight seconds.
 
 ## Native Desktop Client
 

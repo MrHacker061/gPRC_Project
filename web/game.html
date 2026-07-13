@@ -206,12 +206,16 @@
 
     let socket = null;
     let playerId = "";
-    let snapshot = { players: [], arenaWidth: 960, arenaHeight: 620, you: "" };
+    let snapshot = {
+      players: [], rocks: [], arenaWidth: 960, arenaHeight: 620, you: ""
+    };
     let sequence = 0;
     let predictedSelf = null;
     let pendingInputs = [];
     let inputAccumulator = 0;
     let aimDirty = true;
+    let mineSwingUntil = 0;
+    let selectedSlot = 0;
     const aim = { x: 1, y: 0 };
     const pointer = { x: 0, y: 0, inside: false };
     let lastFrameTime = performance.now();
@@ -290,7 +294,7 @@
       });
     }
 
-    function sendInput(movementSeconds = 0) {
+    function sendInput(movementSeconds = 0, mine = false) {
       if (!socket || socket.readyState !== WebSocket.OPEN || !playerId) {
         return;
       }
@@ -303,7 +307,8 @@
         right: keys.right,
         aimX: aim.x,
         aimY: aim.y,
-        movementSeconds
+        movementSeconds,
+        mine
       };
       if (movementSeconds > 0 && predictedSelf) {
         applyMovement(predictedSelf, command);
@@ -311,6 +316,15 @@
       }
       socket.send(JSON.stringify(command));
       aimDirty = false;
+    }
+
+    function mine() {
+      if (!predictedSelf || selectedSlot !== 0) {
+        return;
+      }
+      updateAimFromPointer();
+      mineSwingUntil = performance.now() + 190;
+      sendInput(0, true);
     }
 
     function isEditableTarget(target) {
@@ -343,6 +357,20 @@
 
     function updateKey(event, isDown) {
       if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      const numberSlot = Number(event.key) - 1;
+      if (numberSlot >= 0 && numberSlot < 5) {
+        selectedSlot = numberSlot;
+        event.preventDefault();
+        return;
+      }
+      if (event.code === "Space") {
+        event.preventDefault();
+        if (isDown && !event.repeat) {
+          mine();
+        }
         return;
       }
 
@@ -419,6 +447,7 @@
           predictedSelf.id = player.id;
           predictedSelf.aimX = aim.x;
           predictedSelf.aimY = aim.y;
+          predictedSelf.stone = player.stone;
         }
       }
 
@@ -636,7 +665,7 @@
       const width = 184;
       const height = width * snapshot.arenaHeight / snapshot.arenaWidth;
       const x = canvas.width - width - 16;
-      const y = 16;
+      const y = 60;
 
       ctx.fillStyle = "rgba(12, 16, 14, 0.84)";
       ctx.fillRect(x, y, width, height);
@@ -652,6 +681,15 @@
         camera.width / snapshot.arenaWidth * width,
         camera.height / snapshot.arenaHeight * height
       );
+
+      ctx.fillStyle = "#8f918c";
+      for (const rock of snapshot.rocks || []) {
+        ctx.fillRect(
+          x + rock.x / snapshot.arenaWidth * width - 1,
+          y + rock.y / snapshot.arenaHeight * height - 1,
+          2, 2
+        );
+      }
 
       for (const id of remoteHistory.keys()) {
         const player = id === playerId && predictedSelf
@@ -683,6 +721,66 @@
       }
     }
 
+    function drawHammer(x, y, scale, angle, active = false) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle + (active ? -0.58 : 0));
+      ctx.lineCap = "round";
+      ctx.strokeStyle = "#6b4027";
+      ctx.lineWidth = 5 * scale;
+      ctx.beginPath();
+      ctx.moveTo(-2 * scale, 11 * scale);
+      ctx.lineTo(9 * scale, -10 * scale);
+      ctx.stroke();
+      ctx.fillStyle = "#b8c0c8";
+      ctx.strokeStyle = "#30363d";
+      ctx.lineWidth = 2 * scale;
+      ctx.fillRect(-1 * scale, -17 * scale, 20 * scale, 9 * scale);
+      ctx.strokeRect(-1 * scale, -17 * scale, 20 * scale, 9 * scale);
+      ctx.restore();
+    }
+
+    function drawRock(rock, camera, scaleX, scaleY) {
+      const centerX = (rock.x - camera.x) * scaleX;
+      const centerY = (rock.y - camera.y) * scaleY;
+      const radius = rock.size * Math.min(scaleX, scaleY) / 2;
+      const points = 8;
+
+      ctx.beginPath();
+      for (let i = 0; i < points; ++i) {
+        const angle = i / points * Math.PI * 2;
+        const variation = 0.82 + 0.16 *
+          Math.sin(rock.id * 1.73 + i * 2.41);
+        const px = centerX + Math.cos(angle) * radius * variation;
+        const py = centerY + Math.sin(angle) * radius * variation;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = rock.health === 1 ? "#7b7770" : "#8f918c";
+      ctx.strokeStyle = "#454944";
+      ctx.lineWidth = Math.max(2, radius * 0.12);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(centerX - radius * 0.42, centerY - radius * 0.18);
+      ctx.lineTo(centerX + radius * 0.18, centerY - radius * 0.46);
+      ctx.strokeStyle = "rgba(225, 229, 222, 0.42)";
+      ctx.lineWidth = Math.max(2, radius * 0.1);
+      ctx.stroke();
+
+      if (rock.health < rock.maxHealth) {
+        const barWidth = radius * 1.5;
+        ctx.fillStyle = "rgba(17, 19, 24, 0.8)";
+        ctx.fillRect(centerX - barWidth / 2, centerY - radius - 10,
+          barWidth, 5);
+        ctx.fillStyle = "#d7ddd8";
+        ctx.fillRect(centerX - barWidth / 2, centerY - radius - 10,
+          barWidth * rock.health / rock.maxHealth, 5);
+      }
+    }
+
     function drawCharacter(player, isYou, camera, scaleX, scaleY) {
       const scale = Math.min(scaleX, scaleY);
       const centerX = (player.x - camera.x) * scaleX;
@@ -705,6 +803,16 @@
           outline, outlineWidth);
       }
 
+      if (isYou && selectedSlot === 0) {
+        const hammerX = centerX + direction.x * radius * 1.22 -
+          perpendicular.x * radius * 0.74;
+        const hammerY = centerY + direction.y * radius * 1.22 -
+          perpendicular.y * radius * 0.74;
+        drawHammer(hammerX, hammerY, radius / 27,
+          Math.atan2(direction.y, direction.x) + Math.PI / 2,
+          performance.now() < mineSwingUntil);
+      }
+
       if (isYou) {
         drawCircle(centerX, centerY, radius + 5, "transparent",
           "#f5f7fb", 2);
@@ -718,6 +826,48 @@
       ctx.fillText(player.name, centerX, centerY - radius - 10);
     }
 
+    function drawHud() {
+      const self = predictedSelf || playerMeta.get(playerId);
+      const stone = Number(self?.stone) || 0;
+      const panelWidth = 184;
+      const panelX = canvas.width - panelWidth - 16;
+
+      ctx.fillStyle = "rgba(12, 16, 14, 0.88)";
+      ctx.fillRect(panelX, 16, panelWidth, 34);
+      ctx.strokeStyle = "rgba(245, 247, 251, 0.72)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(panelX, 16, panelWidth, 34);
+      drawCircle(panelX + 19, 33, 8, "#92958f", "#d7ddd8", 2);
+      ctx.font = "bold 14px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#f5f7fb";
+      ctx.fillText(`STONE  ${stone}`, panelX + 36, 38);
+
+      const slotSize = 52;
+      const gap = 7;
+      const slots = 5;
+      const totalWidth = slotSize * slots + gap * (slots - 1);
+      const startX = (canvas.width - totalWidth) / 2;
+      const y = canvas.height - slotSize - 16;
+      for (let slot = 0; slot < slots; ++slot) {
+        const x = startX + slot * (slotSize + gap);
+        ctx.fillStyle = slot === selectedSlot
+          ? "rgba(213, 221, 216, 0.94)"
+          : "rgba(12, 16, 14, 0.82)";
+        ctx.fillRect(x, y, slotSize, slotSize);
+        ctx.strokeStyle = slot === selectedSlot ? "#f5f7fb" : "#68736d";
+        ctx.lineWidth = slot === selectedSlot ? 3 : 2;
+        ctx.strokeRect(x, y, slotSize, slotSize);
+        ctx.font = "11px Segoe UI, Arial, sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillStyle = slot === selectedSlot ? "#202620" : "#aeb7c8";
+        ctx.fillText(String(slot + 1), x + 5, y + 13);
+        if (slot === 0) {
+          drawHammer(x + 24, y + 29, 1.15, 0.62);
+        }
+      }
+    }
+
     function draw(now) {
       const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
       lastFrameTime = now;
@@ -728,6 +878,17 @@
       const scaleY = canvas.height / camera.height;
       drawBackground(camera, scaleX, scaleY);
       drawGrid(camera, scaleX, scaleY);
+
+      for (const rock of snapshot.rocks || []) {
+        const margin = rock.size;
+        if (rock.x + margin < camera.x ||
+            rock.x - margin > camera.x + camera.width ||
+            rock.y + margin < camera.y ||
+            rock.y - margin > camera.y + camera.height) {
+          continue;
+        }
+        drawRock(rock, camera, scaleX, scaleY);
+      }
 
       for (const id of remoteHistory.keys()) {
         const player = interpolatedPlayer(id, now);
@@ -747,6 +908,7 @@
       }
 
       drawMinimap(camera, now);
+      drawHud();
 
       requestAnimationFrame(draw);
     }
@@ -765,6 +927,30 @@
       pointer.y = (event.clientY - bounds.top) * canvas.height / bounds.height;
       pointer.inside = true;
       updateAimFromPointer();
+    });
+    canvas.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+      const bounds = canvas.getBoundingClientRect();
+      pointer.x = (event.clientX - bounds.left) * canvas.width / bounds.width;
+      pointer.y = (event.clientY - bounds.top) * canvas.height / bounds.height;
+      pointer.inside = true;
+      const slotSize = 52;
+      const gap = 7;
+      const totalWidth = slotSize * 5 + gap * 4;
+      const startX = (canvas.width - totalWidth) / 2;
+      const hotbarY = canvas.height - slotSize - 16;
+      if (pointer.y >= hotbarY && pointer.y <= hotbarY + slotSize) {
+        for (let slot = 0; slot < 5; ++slot) {
+          const slotX = startX + slot * (slotSize + gap);
+          if (pointer.x >= slotX && pointer.x <= slotX + slotSize) {
+            selectedSlot = slot;
+            return;
+          }
+        }
+      }
+      mine();
     });
     canvas.addEventListener("pointerleave", () => {
       pointer.inside = false;

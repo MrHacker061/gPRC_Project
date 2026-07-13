@@ -38,6 +38,7 @@ message PlayerInput {
   float aim_x = 7;
   float aim_y = 8;
   float movement_seconds = 9;
+  bool mine = 10;
 }
 
 message InputAck {
@@ -58,6 +59,16 @@ message PlayerState {
   float aim_x = 7;
   float aim_y = 8;
   uint64 last_processed_input_sequence = 9;
+  uint32 stone = 10;
+}
+
+message RockState {
+  uint32 rock_id = 1;
+  float x = 2;
+  float y = 3;
+  float size = 4;
+  uint32 health = 5;
+  uint32 max_health = 6;
 }
 
 message WorldSnapshot {
@@ -65,4 +76,5 @@ message WorldSnapshot {
   float arena_width = 2;
   float arena_height = 3;
   repeated PlayerState players = 4;
+  repeated RockState rocks = 5;
 }

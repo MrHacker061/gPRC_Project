@@ -8,6 +8,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -29,6 +30,7 @@ using game::LeaveGameRequest;
 using game::LeaveGameResponse;
 using game::PlayerInput;
 using game::PlayerState;
+using game::RockState;
 using game::WorldRequest;
 using game::WorldSnapshot;
 using grpc::Server;
@@ -45,6 +47,10 @@ constexpr float kSpawnCameraHalfHeight = 310.0f;
 constexpr float kPlayerSize = 56.0f;
 constexpr float kPlayerBoundaryPadding = kPlayerSize * 0.78f;
 constexpr float kPlayerSpeed = 320.0f;
+constexpr float kMiningRange = 210.0f;
+constexpr uint32_t kRockHealth = 3;
+constexpr auto kMiningCooldown = std::chrono::milliseconds(260);
+constexpr auto kRockRespawnDelay = std::chrono::seconds(8);
 constexpr auto kTickDuration = std::chrono::milliseconds(16);
 
 std::string NormalizeDisplayName(std::string name) {
@@ -92,11 +98,25 @@ struct Player {
   float x = 0.0f;
   float y = 0.0f;
   InputState input;
+  uint32_t stone = 0;
+  std::chrono::steady_clock::time_point last_mine_at{};
+};
+
+struct Rock {
+  uint32_t id = 0;
+  float x = 0.0f;
+  float y = 0.0f;
+  float size = 42.0f;
+  uint32_t health = kRockHealth;
+  std::chrono::steady_clock::time_point respawn_at{};
 };
 
 class GameWorld {
  public:
-  GameWorld() : running_(true), tick_thread_([this] { TickLoop(); }) {}
+  GameWorld() : running_(true) {
+    InitializeRocks();
+    tick_thread_ = std::thread([this] { TickLoop(); });
+  }
 
   ~GameWorld() {
     running_ = false;
@@ -179,6 +199,9 @@ class GameWorld {
           player->second.y + dy * kPlayerSpeed * safe_seconds,
           kPlayerBoundaryPadding, kArenaHeight - kPlayerBoundaryPadding);
     }
+    if (input.mine()) {
+      TryMineLocked(&player->second);
+    }
     player->second.input.sequence = input.sequence();
     return player->second.input.sequence;
   }
@@ -210,11 +233,75 @@ class GameWorld {
   }
 
  private:
+  void InitializeRocks() {
+    std::mt19937 rock_rng{0xB0A4D3u};
+    std::uniform_real_distribution<float> jitter(-38.0f, 38.0f);
+    std::uniform_real_distribution<float> size(34.0f, 52.0f);
+    uint32_t id = 1;
+    for (float y = 150.0f; y < kArenaHeight - 120.0f; y += 230.0f) {
+      for (float x = 150.0f; x < kArenaWidth - 120.0f; x += 230.0f) {
+        Rock rock;
+        rock.id = id++;
+        rock.x = std::clamp(x + jitter(rock_rng), 80.0f, kArenaWidth - 80.0f);
+        rock.y = std::clamp(y + jitter(rock_rng), 80.0f, kArenaHeight - 80.0f);
+        rock.size = size(rock_rng);
+        rocks_.push_back(rock);
+      }
+    }
+  }
+
+  void TryMineLocked(Player* player) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - player->last_mine_at < kMiningCooldown) {
+      return;
+    }
+
+    Rock* target = nullptr;
+    float best_score = std::numeric_limits<float>::max();
+    for (Rock& rock : rocks_) {
+      if (rock.health == 0) {
+        continue;
+      }
+      const float dx = rock.x - player->x;
+      const float dy = rock.y - player->y;
+      const float distance = std::hypot(dx, dy);
+      if (distance < 0.001f || distance > kMiningRange + rock.size / 2.0f) {
+        continue;
+      }
+      const float facing =
+          (dx * player->input.aim_x + dy * player->input.aim_y) / distance;
+      if (facing < 0.55f) {
+        continue;
+      }
+      const float score = distance + (1.0f - facing) * 120.0f;
+      if (score < best_score) {
+        best_score = score;
+        target = &rock;
+      }
+    }
+
+    if (target == nullptr) {
+      return;
+    }
+    player->last_mine_at = now;
+    ++player->stone;
+    --target->health;
+    if (target->health == 0) {
+      target->respawn_at = now + kRockRespawnDelay;
+    }
+  }
+
   void TickLoop() {
     while (running_) {
       std::this_thread::sleep_for(kTickDuration);
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        for (Rock& rock : rocks_) {
+          if (rock.health == 0 && now >= rock.respawn_at) {
+            rock.health = kRockHealth;
+          }
+        }
         ++tick_;
       }
       changed_.notify_all();
@@ -237,6 +324,19 @@ class GameWorld {
       state->set_aim_x(player.input.aim_x);
       state->set_aim_y(player.input.aim_y);
       state->set_last_processed_input_sequence(player.input.sequence);
+      state->set_stone(player.stone);
+    }
+    for (const Rock& rock : rocks_) {
+      if (rock.health == 0) {
+        continue;
+      }
+      RockState* state = snapshot.add_rocks();
+      state->set_rock_id(rock.id);
+      state->set_x(rock.x);
+      state->set_y(rock.y);
+      state->set_size(rock.size);
+      state->set_health(rock.health);
+      state->set_max_health(kRockHealth);
     }
     return snapshot;
   }
@@ -245,6 +345,7 @@ class GameWorld {
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   std::map<std::string, Player> players_;
+  std::vector<Rock> rocks_;
   std::mt19937 rng_{std::random_device{}()};
   std::size_t next_color_ = 0;
   uint64_t tick_ = 0;

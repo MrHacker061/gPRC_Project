@@ -52,6 +52,7 @@ HWND g_server_edit = nullptr;
 HWND g_name_edit = nullptr;
 HWND g_connect_button = nullptr;
 HWND g_status_label = nullptr;
+int g_selected_slot = 0;
 
 struct PredictedPlayer {
   std::string id;
@@ -323,6 +324,10 @@ class NativeGameClient {
     }
   }
 
+  void Mine() {
+    SendInput(0.0f, true);
+  }
+
   NativeRenderState CaptureRenderState() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     NativeRenderState state;
@@ -336,7 +341,7 @@ class NativeGameClient {
   }
 
  private:
-  void SendInput(float movement_seconds) {
+  void SendInput(float movement_seconds, bool mine = false) {
     if (!connected_) {
       return;
     }
@@ -347,6 +352,7 @@ class NativeGameClient {
       input = input_;
       input.set_sequence(++sequence_);
       input.set_movement_seconds(movement_seconds);
+      input.set_mine(mine);
       input_dirty_ = false;
     }
 
@@ -664,6 +670,75 @@ void DrawPlayer(HDC dc,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+void DrawRock(HDC dc,
+              const RECT& arena,
+              const CameraView& camera,
+              const game::RockState& rock) {
+  const float scale_x =
+      static_cast<float>(arena.right - arena.left) / camera.width;
+  const float scale_y =
+      static_cast<float>(arena.bottom - arena.top) / camera.height;
+  const float scale = std::min(scale_x, scale_y);
+  const int center_x = arena.left + static_cast<int>(
+      std::lround((rock.x() - camera.x) * scale_x));
+  const int center_y = arena.top + static_cast<int>(
+      std::lround((rock.y() - camera.y) * scale_y));
+  const float radius = rock.size() * scale / 2.0f;
+  POINT points[8];
+  for (int i = 0; i < 8; ++i) {
+    const float angle = static_cast<float>(i) / 8.0f * 6.2831853f;
+    const float variation =
+        0.82f + 0.16f * std::sin(rock.rock_id() * 1.73f + i * 2.41f);
+    points[i].x = center_x + static_cast<int>(
+        std::lround(std::cos(angle) * radius * variation));
+    points[i].y = center_y + static_cast<int>(
+        std::lround(std::sin(angle) * radius * variation));
+  }
+
+  HGDIOBJ old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
+  HGDIOBJ old_pen = SelectObject(dc, GetStockObject(DC_PEN));
+  SetDCBrushColor(dc, rock.health() == 1 ? RGB(123, 119, 112)
+                                         : RGB(143, 145, 140));
+  SetDCPenColor(dc, RGB(69, 73, 68));
+  Polygon(dc, points, 8);
+  SelectObject(dc, old_pen);
+  SelectObject(dc, old_brush);
+
+  if (rock.health() < rock.max_health()) {
+    const int bar_width = std::max(12, static_cast<int>(std::lround(radius * 1.5f)));
+    RECT bar{center_x - bar_width / 2,
+             center_y - static_cast<int>(std::lround(radius)) - 10,
+             center_x + bar_width / 2,
+             center_y - static_cast<int>(std::lround(radius)) - 5};
+    FillSolidRect(dc, bar, RGB(25, 28, 27));
+    bar.right = bar.left + static_cast<int>(
+        std::lround(bar_width * static_cast<float>(rock.health()) /
+                    std::max(rock.max_health(), 1u)));
+    FillSolidRect(dc, bar, RGB(215, 221, 216));
+  }
+}
+
+void DrawHammerIcon(HDC dc, int center_x, int center_y, float scale) {
+  HPEN handle_pen = CreatePen(
+      PS_SOLID, std::max(2, static_cast<int>(std::lround(5.0f * scale))),
+      RGB(107, 64, 39));
+  HGDIOBJ old_pen = SelectObject(dc, handle_pen);
+  MoveToEx(dc, center_x - static_cast<int>(2 * scale),
+           center_y + static_cast<int>(11 * scale), nullptr);
+  LineTo(dc, center_x + static_cast<int>(8 * scale),
+         center_y - static_cast<int>(9 * scale));
+  SelectObject(dc, old_pen);
+  DeleteObject(handle_pen);
+
+  RECT head{center_x - static_cast<int>(3 * scale),
+            center_y - static_cast<int>(16 * scale),
+            center_x + static_cast<int>(17 * scale),
+            center_y - static_cast<int>(7 * scale)};
+  FillSolidRect(dc, head, RGB(184, 192, 200));
+  SetDCBrushColor(dc, RGB(48, 54, 61));
+  FrameRect(dc, &head, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+}
+
 void DrawMinimap(HDC dc,
                  const RECT& arena,
                  const NativeRenderState& state,
@@ -675,9 +750,9 @@ void DrawMinimap(HDC dc,
   const int map_height = std::max(
       1, static_cast<int>(std::lround(kMapWidth * world_height / world_width)));
   const RECT map{arena.right - kMapWidth - kMapMargin,
-                 arena.top + kMapMargin,
+                 arena.top + 60,
                  arena.right - kMapMargin,
-                 arena.top + kMapMargin + map_height};
+                 arena.top + 60 + map_height};
 
   FillSolidRect(dc, map, RGB(20, 27, 22));
   SetDCBrushColor(dc, RGB(205, 214, 209));
@@ -692,6 +767,14 @@ void DrawMinimap(HDC dc,
                     (camera.y + camera.height) / world_height * map_height))};
   SetDCBrushColor(dc, RGB(122, 136, 128));
   FrameRect(dc, &view, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+
+  for (const auto& rock : state.snapshot.rocks()) {
+    const int marker_x = map.left + static_cast<int>(
+        std::lround(rock.x() / world_width * kMapWidth));
+    const int marker_y = map.top + static_cast<int>(
+        std::lround(rock.y() / world_height * map_height));
+    FillCircle(dc, marker_x, marker_y, 1, RGB(143, 145, 140));
+  }
 
   for (const auto& player : state.snapshot.players()) {
     const bool is_self = player.player_id() == state.player_id;
@@ -710,6 +793,61 @@ void DrawMinimap(HDC dc,
     }
     FillCircle(dc, marker_x, marker_y, is_self ? 3 : 2,
                ParseColor(player.color()));
+  }
+}
+
+void DrawHud(HDC dc, const RECT& arena, const NativeRenderState& state) {
+  constexpr int kPanelWidth = 184;
+  constexpr int kMargin = 16;
+  const RECT resource{arena.right - kPanelWidth - kMargin,
+                      arena.top + kMargin,
+                      arena.right - kMargin,
+                      arena.top + kMargin + 34};
+  FillSolidRect(dc, resource, RGB(20, 27, 22));
+  SetDCBrushColor(dc, RGB(205, 214, 209));
+  FrameRect(dc, &resource, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+
+  uint32_t stone = 0;
+  for (const auto& player : state.snapshot.players()) {
+    if (player.player_id() == state.player_id) {
+      stone = player.stone();
+      break;
+    }
+  }
+  FillCircle(dc, resource.left + 19, resource.top + 17, 8,
+             RGB(146, 149, 143));
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, RGB(245, 247, 251));
+  const std::string text = "STONE  " + std::to_string(stone);
+  RECT text_rect{resource.left + 36, resource.top + 8,
+                 resource.right - 6, resource.bottom - 4};
+  DrawTextA(dc, text.c_str(), -1, &text_rect,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  constexpr int kSlotSize = 48;
+  constexpr int kGap = 7;
+  constexpr int kSlots = 5;
+  const int total_width = kSlots * kSlotSize + (kSlots - 1) * kGap;
+  const int start_x = arena.left +
+      ((arena.right - arena.left) - total_width) / 2;
+  const int y = arena.bottom - kSlotSize - 16;
+  for (int slot = 0; slot < kSlots; ++slot) {
+    const int x = start_x + slot * (kSlotSize + kGap);
+    RECT box{x, y, x + kSlotSize, y + kSlotSize};
+    FillSolidRect(dc, box, slot == g_selected_slot ? RGB(213, 221, 216)
+                                                   : RGB(20, 27, 22));
+    SetDCBrushColor(dc, slot == g_selected_slot ? RGB(245, 247, 251)
+                                                : RGB(104, 115, 109));
+    FrameRect(dc, &box, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    SetTextColor(dc, slot == g_selected_slot ? RGB(32, 38, 32)
+                                             : RGB(174, 183, 200));
+    const std::string number = std::to_string(slot + 1);
+    RECT number_rect{x + 4, y + 3, x + 18, y + 17};
+    DrawTextA(dc, number.c_str(), -1, &number_rect,
+              DT_LEFT | DT_TOP | DT_SINGLELINE);
+    if (slot == 0) {
+      DrawHammerIcon(dc, x + 23, y + 28, 1.0f);
+    }
   }
 }
 
@@ -755,6 +893,16 @@ void DrawScene(HDC dc, const RECT& client) {
     IntersectClipRect(dc, arena.left + 1, arena.top + 1, arena.right - 1,
                       arena.bottom - 1);
   }
+  for (const auto& rock : state.snapshot.rocks()) {
+    const float margin = rock.size();
+    if (rock.x() + margin < camera.x ||
+        rock.x() - margin > camera.x + camera.width ||
+        rock.y() + margin < camera.y ||
+        rock.y() - margin > camera.y + camera.height) {
+      continue;
+    }
+    DrawRock(dc, arena, camera, rock);
+  }
   for (const auto& player : state.snapshot.players()) {
     if (player.player_id() == state.player_id && state.predicted_ready) {
       continue;
@@ -785,6 +933,7 @@ void DrawScene(HDC dc, const RECT& client) {
     RestoreDC(dc, saved_dc);
   }
   DrawMinimap(dc, arena, state, camera);
+  DrawHud(dc, arena, state);
 }
 
 void Paint(HWND window) {
@@ -910,6 +1059,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       break;
 
     case WM_KEYDOWN:
+      if (wparam >= '1' && wparam <= '5') {
+        g_selected_slot = static_cast<int>(wparam - '1');
+        InvalidateArena(window);
+        return 0;
+      }
       g_client.SetKey(wparam, true);
       return 0;
 
@@ -926,6 +1080,45 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       g_has_mouse_target = !IsRectEmpty(&arena) &&
                            PtInRect(&arena, g_mouse_target);
       UpdateMouseAim(window);
+      return 0;
+    }
+
+    case WM_LBUTTONDOWN: {
+      g_mouse_target.x = static_cast<short>(LOWORD(lparam));
+      g_mouse_target.y = static_cast<short>(HIWORD(lparam));
+      RECT client;
+      GetClientRect(window, &client);
+      const RECT arena = ArenaRectForClient(client);
+      if (!IsRectEmpty(&arena) && PtInRect(&arena, g_mouse_target)) {
+        constexpr int kSlotSize = 48;
+        constexpr int kGap = 7;
+        constexpr int kSlots = 5;
+        const int total_width = kSlots * kSlotSize + (kSlots - 1) * kGap;
+        const int start_x = arena.left +
+            ((arena.right - arena.left) - total_width) / 2;
+        const int hotbar_y = arena.bottom - kSlotSize - 16;
+        if (g_mouse_target.y >= hotbar_y &&
+            g_mouse_target.y <= hotbar_y + kSlotSize) {
+          for (int slot = 0; slot < kSlots; ++slot) {
+            const int slot_x = start_x + slot * (kSlotSize + kGap);
+            if (g_mouse_target.x >= slot_x &&
+                g_mouse_target.x <= slot_x + kSlotSize) {
+              g_selected_slot = slot;
+              InvalidateArena(window);
+              SetFocus(window);
+              return 0;
+            }
+          }
+        }
+        g_has_mouse_target = true;
+        UpdateMouseAim(window);
+        g_client.FlushInput();
+        if (g_selected_slot == 0) {
+          g_client.Mine();
+        }
+        InvalidateArena(window);
+      }
+      SetFocus(window);
       return 0;
     }
 
